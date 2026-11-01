@@ -64,6 +64,12 @@ export function runtimeInstanceId(
 type AddPageOptions = {
   as?: string;
   openedBy?: PageOrigin;
+  /**
+   * Give `as` back to a Page although the label was used before, as long as
+   * no live Page holds it: restorePages() reopens a lost Page under its old
+   * label.
+   */
+  reclaim?: boolean;
 };
 
 type ReconcileOptions = {
@@ -165,7 +171,11 @@ export class PageLedgerStore {
 
       const used = new Set(ledger.usedLabels);
       const label = options.as || nextAutomaticLabel(ledger, used);
-      if (used.has(label)) {
+      const reclaimed =
+        options.reclaim === true &&
+        options.as !== undefined &&
+        !Object.hasOwn(ledger.pages, label);
+      if (used.has(label) && !reclaimed) {
         throw new Error(`page label already used: ${label}`);
       }
       const entry: PageLedgerEntry = {
@@ -174,7 +184,7 @@ export class PageLedgerStore {
       };
       ledger.initialized = true;
       delete ledger.unmanagedTargets[targetId];
-      ledger.usedLabels.push(label);
+      if (!used.has(label)) ledger.usedLabels.push(label);
       ledger.pages[label] = entry;
       added = { label, ...entry };
     });

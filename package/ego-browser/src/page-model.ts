@@ -481,7 +481,7 @@ type LedgerPort = {
   addPage(
     spaceId: number,
     targetId: string,
-    options?: { as?: string; openedBy?: PageOrigin },
+    options?: { as?: string; openedBy?: PageOrigin; reclaim?: boolean },
   ): Promise<ManagedPage>;
   getPage(spaceId: number, label: string): Promise<ManagedPage>;
   setPageRefs(
@@ -1698,10 +1698,9 @@ class TaskSpace {
         : {};
       const result = await this.#services.restoreTaskSpaceTabs();
       const ledger = await this.#services.ledger.read(this.id);
-      const taken = new Set([
-        ...(ledger.usedLabels || []),
-        ...Object.keys(ledger.pages),
-      ]);
+      // Only labels of live Pages are taken. A label the restart retired
+      // (still in usedLabels) goes back to the Page that had it.
+      const taken = new Set(Object.keys(ledger.pages));
       const pages: Array<{ label: string; url: string }> = [];
       let lastTarget: string | undefined;
       for (const tab of result.tabs) {
@@ -1711,7 +1710,7 @@ class TaskSpace {
         const entry = await this.#services.ledger.addPage(
           this.id,
           tab.targetId,
-          { ...(label ? { as: label } : {}), openedBy: "agent" },
+          { ...(label ? { as: label, reclaim: true } : {}), openedBy: "agent" },
         );
         taken.add(entry.label);
         pages.push({ label: entry.label, url: tab.url });

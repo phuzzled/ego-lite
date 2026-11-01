@@ -7935,3 +7935,35 @@ test("restorePages on an ephemeral task space fails clearly", async () => {
     assert.equal(restored, false, "the host is not asked");
   });
 });
+
+test("restorePages gives a Page back the label a crash retired", async () => {
+  await withFixture(async (fixture) => {
+    const host = hostServices({
+      taskSpaceMemo: true,
+      restoreTaskSpaceTabs: true,
+    });
+    const task = taskForRound(fixture, "round-a", host.overrides);
+    const p1 = await openTestPage(task, "https://example.test/one");
+    assert.equal(p1.label, "p1");
+    // The profile's browser dies: the ledger keeps p1 as a used label, but
+    // its tab is gone, so reconciliation drops the live entry.
+    const ledger = new PageLedgerStore({ rootDir: fixture.rootDir });
+    await ledger.closePage(7, "p1");
+    const before = await ledger.read(7);
+    assert(before.usedLabels.includes("p1") && !before.pages.p1);
+    const restored = taskForRound(fixture, "round-b", {
+      ...host.overrides,
+      async restoreTaskSpaceTabs() {
+        fixture.addExternalTab("target-r1", "https://example.test/one");
+        return {
+          tabs: [{ targetId: "target-r1", url: "https://example.test/one" }],
+          skipped: [],
+        };
+      },
+    });
+    const result = await restored.restorePages();
+    assert.deepEqual(result.pages, [
+      { label: "p1", url: "https://example.test/one" },
+    ]);
+  });
+});
