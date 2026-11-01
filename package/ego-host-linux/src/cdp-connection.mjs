@@ -2,6 +2,27 @@
  * Minimal Chrome DevTools Protocol client over the browser WebSocket endpoint.
  * Uses the WebSocket built into Node 22+, so the host has no dependencies.
  */
+
+const LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "::1"];
+
+/**
+ * With NODE_USE_ENV_PROXY=1 (or --use-env-proxy) Node sends WebSocket
+ * connections through HTTP_PROXY, which cannot reach the browser's loopback
+ * DevTools port. Node reads NO_PROXY on every request, so exempt loopback.
+ */
+export function bypassProxyForLoopback(env = process.env) {
+  const keys = ["no_proxy", "NO_PROXY"].filter((key) => env[key] !== undefined);
+  if (keys.length === 0) keys.push("NO_PROXY");
+  for (const key of keys) {
+    const entries = (env[key] || "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    if (entries.includes("*")) continue;
+    const missing = LOOPBACK_HOSTS.filter((host) => !entries.includes(host));
+    if (missing.length > 0) env[key] = [...entries, ...missing].join(",");
+  }
+}
 export class CdpConnection {
   #socket;
   #nextId = 1;
@@ -18,6 +39,7 @@ export class CdpConnection {
   }
 
   static connect(url, timeoutMs = 10_000) {
+    bypassProxyForLoopback();
     return new Promise((resolve, reject) => {
       const socket = new WebSocket(url);
       const timer = setTimeout(() => {
