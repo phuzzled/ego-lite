@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
-import { TaskSpaceRegistry } from "./task-spaces.mjs";
+import { DEFAULT_CONFIG } from "./config.mjs";
+import { MAX_MEMO_BYTES, TaskSpaceRegistry } from "./task-spaces.mjs";
 
 function fakeBrowser() {
   const browser = {
@@ -268,5 +269,203 @@ describe("TaskSpaceRegistry", () => {
     await tracked.createTaskSpace("work");
     assert.ok(saves > 0);
     assert.equal(saves, changes);
+  });
+});
+
+describe("TaskSpaceRegistry limits", () => {
+  const limited = (overrides, memoryMb = () => null) => {
+    const browser = fakeBrowser();
+    return new TaskSpaceRegistry({
+      browser,
+      limits: () => ({ ...DEFAULT_CONFIG, ...overrides }),
+      memoryMb,
+    });
+  };
+
+  it("refuses a task space past maxTaskSpaces, counting agent spaces only", async () => {
+    const registry = limited({ maxTaskSpaces: 1 });
+    await registry.createTaskSpace("one");
+    const refused = await registry.createTaskSpace("two");
+    assert.equal(refused.error_code, "EGO_RESOURCE_LIMIT");
+    assert.match(refused.error, /ego-browser gc/);
+    assert.equal(registry.describe(2), null);
+    registry.completeTaskSpace(1);
+    assert.equal((await registry.createTaskSpace("two")).id, 2);
+  });
+
+  it("refuses pages past the per-space and total limits", async () => {
+    const registry = limited({ maxPagesPerSpace: 2, maxTotalPages: 3 });
+    await registry.createTaskSpace("a");
+    await registry.createTab(1, "about:blank");
+    assert.equal(
+      (await registry.createTab(1, "about:blank")).error_code,
+      "EGO_RESOURCE_LIMIT",
+    );
+    await registry.createTaskSpace("b");
+    const total = await registry.createTab(2, "about:blank");
+    assert.equal(total.error_code, "EGO_RESOURCE_LIMIT");
+    assert.match(total.error, /3 pages are open/);
+  });
+
+  it("refuses new pages above the memory budget; 0 turns a limit off", async () => {
+    const registry = limited({ maxRssMb: 1000 }, () => 1500);
+    const refused = await registry.createTaskSpace("a");
+    assert.equal(refused.error_code, "EGO_RESOURCE_LIMIT");
+    assert.match(refused.error, /1500 MB/);
+    const unlimited = limited({ maxRssMb: 0, maxTaskSpaces: 0 }, () => 1500);
+    assert.equal((await unlimited.createTaskSpace("a")).id, 1);
+    assert.deepEqual(
+      { ...unlimited.usage(), memoryMb: undefined },
+      { taskSpaces: 1, agentTaskSpaces: 1, pages: 1, memoryMb: undefined },
+    );
+  });
+});
+
+describe("TaskSpaceRegistry TTL and gc", () => {
+  const HOUR = 60 * 60_000;
+  let clock;
+  let browser;
+  let registry;
+
+  beforeEach(() => {
+    clock = 1_000_000;
+    browser = fakeBrowser();
+    registry = new TaskSpaceRegistry({
+      browser,
+      now: () => clock,
+      limits: () => ({
+        ...DEFAULT_CONFIG,
+        defaultTtlMs: 24 * HOUR,
+        handOffTtlMs: HOUR,
+      }),
+    });
+  });
+
+  it("closes agent spaces idle past their TTL, and use resets the clock", async () => {
+    await registry.createTaskSpace("default ttl");
+    await registry.createTaskSpace("short", undefined, { ttlMs: HOUR });
+    clock += 2 * HOUR;
+    assert.deepEqual(
+      (await registry.gc({ dryRun: true })).map((a) => [a.id, a.action]),
+      [[2, "closed"]],
+    );
+    assert.notEqual(registry.describe(2), null, "dry run closes nothing");
+    registry.touch(1);
+    clock += 23 * HOUR;
+    const actions = await registry.gc();
+    assert.deepEqual(
+      actions.map((a) => [a.id, a.action]),
+      [[2, "closed"]],
+    );
+    assert.equal(registry.describe(2), null);
+    assert.notEqual(registry.describe(1), null);
+    clock += 2 * HOUR;
+    assert.deepEqual(
+      (await registry.gc()).map((a) => a.id),
+      [1],
+    );
+  });
+
+  it("never closes user-owned spaces", async () => {
+    await registry.createTaskSpace("done");
+    registry.completeTaskSpace(1);
+    clock += 100 * HOUR;
+    assert.deepEqual(await registry.gc(), []);
+  });
+
+  it("returns an unseen hand-off to the agent after handOffTtlMs", async () => {
+    await registry.createTaskSpace("login");
+    await registry.handOffTaskSpace(1);
+    clock += 2 * HOUR;
+    assert.deepEqual(await registry.gc({ handOffVisible: true }), []);
+    const [action] = await registry.gc({ handOffVisible: false });
+    assert.equal(action.action, "returned");
+    assert.equal(registry.describe(1).control, "agent");
+    assert.equal(registry.gate(1), null);
+  });
+
+  it("checks ttlMs", async () => {
+    for (const ttlMs of [0, -5, 1.5, 31 * 24 * HOUR]) {
+      const result = await registry.createTaskSpace(`t${ttlMs}`, undefined, {
+        ttlMs,
+      });
+      assert.equal(result.error_code, "EGO_INVALID_ARGUMENT");
+    }
+  });
+});
+
+describe("TaskSpaceRegistry memo and restore", () => {
+  let browser;
+  let registry;
+
+  beforeEach(() => {
+    browser = fakeBrowser();
+    registry = new TaskSpaceRegistry({ browser });
+  });
+
+  it("stores JSON per space, deletes with null, clears on complete", async () => {
+    await registry.createTaskSpace("work");
+    assert.deepEqual(registry.memo(1, "step", undefined, false), {
+      found: false,
+      value: null,
+    });
+    registry.memo(1, "step", { at: 5, file: "/r.csv" }, true);
+    assert.deepEqual(registry.memo(1, "step", undefined, false), {
+      found: true,
+      value: { at: 5, file: "/r.csv" },
+    });
+    const saved = registry.snapshotState();
+    const restored = new TaskSpaceRegistry({ browser, saved });
+    assert.equal(restored.memo(1, "step", undefined, false).found, true);
+    registry.memo(1, "step", null, true);
+    assert.equal(registry.memo(1, "step", undefined, false).found, false);
+    registry.memo(1, "k", 1, true);
+    registry.completeTaskSpace(1);
+    assert.equal(registry.describe(1).memo, undefined);
+  });
+
+  it("refuses a memo store past its size and bad keys", async () => {
+    await registry.createTaskSpace("work");
+    const big = registry.memo(1, "big", "x".repeat(MAX_MEMO_BYTES), true);
+    assert.equal(big.error_code, "EGO_RESOURCE_LIMIT");
+    assert.equal(
+      registry.memo(1, "", 1, true).error_code,
+      "EGO_INVALID_ARGUMENT",
+    );
+    await registry.handOffTaskSpace(1);
+    assert.equal(
+      registry.memo(1, "k", undefined, false).error_code,
+      "EGO_TASK_SPACE_USER_IN_CONTROL",
+    );
+  });
+
+  it("marks a space stale and reopens only its http(s) tabs", async () => {
+    await registry.createTaskSpace("work");
+    await registry.createTab(1, "https://a.test/list");
+    await registry.createTab(1, "https://b.test/form");
+    browser.infos.set("T1", { url: "about:blank" });
+    browser.infos.set("T2", { url: "https://a.test/list" });
+    browser.infos.set("T3", { url: "https://b.test/form" });
+    const saved = registry.snapshotState();
+
+    const after = fakeBrowser();
+    after.nextTarget = 10;
+    const restarted = new TaskSpaceRegistry({ browser: after, saved });
+    restarted.pruneTargets([]);
+    assert.equal(restarted.describe(1).stale, true);
+    const result = await restarted.restoreTabs(1);
+    assert.deepEqual(
+      result.tabs.map((tab) => tab.url),
+      ["https://a.test/list", "https://b.test/form"],
+    );
+    assert.deepEqual(result.skipped, ["about:blank"]);
+    assert.deepEqual(
+      after.created.map((c) => c.url),
+      ["https://a.test/list", "https://b.test/form"],
+    );
+    const space = restarted.describe(1);
+    assert.equal(space.stale, undefined);
+    assert.equal(space.lostTabs, undefined);
+    assert.deepEqual(await restarted.restoreTabs(1), { tabs: [], skipped: [] });
   });
 });

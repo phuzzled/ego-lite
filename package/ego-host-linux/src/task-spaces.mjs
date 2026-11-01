@@ -5,7 +5,12 @@
  * tracked by target id, not by window, so popups join their opener's space and
  * window placement stays cosmetic. Result shapes and error codes follow
  * docs/native-bindings-api.md.
+ *
+ * Linux-host additions: a last-activity time and TTL per space (`gc`),
+ * resource limits, a small memo store per space, and the URLs of tabs lost
+ * in a browser restart, which `restoreTabs` can reopen.
  */
+import { DEFAULT_CONFIG, MAX_TTL_MS } from "./config.mjs";
 import { egoError } from "./errors.mjs";
 
 export const DEFAULT_PROFILE = Object.freeze({
@@ -14,12 +19,21 @@ export const DEFAULT_PROFILE = Object.freeze({
   isDefault: true,
 });
 
+/** Largest memo store per space, as JSON text. */
+export const MAX_MEMO_BYTES = 64 * 1024;
+const MAX_MEMO_KEY = 200;
+/** Save last-activity times at most this often. */
+const ACTIVITY_SAVE_MS = 60_000;
+
 export class TaskSpaceRegistry {
   #spaces = new Map();
   #nextId = 1;
   #browser;
   #save;
   #onChange;
+  #now;
+  #limits;
+  #memoryMb;
 
   /**
    * @param {object} options
@@ -27,14 +41,32 @@ export class TaskSpaceRegistry {
    * @param {object} [options.saved]  previously saved state
    * @param {(state: object) => void} [options.save]
    * @param {() => void} [options.onChange]
+   * @param {() => number} [options.now]
+   * @param {() => object} [options.limits]   current config (see config.mjs)
+   * @param {() => number | null} [options.memoryMb]  browser memory use
    */
-  constructor({ browser, saved, save = () => {}, onChange = () => {} }) {
+  constructor({
+    browser,
+    saved,
+    save = () => {},
+    onChange = () => {},
+    now = Date.now,
+    limits = () => DEFAULT_CONFIG,
+    memoryMb = () => null,
+  }) {
     this.#browser = browser;
     this.#save = save;
     this.#onChange = onChange;
+    this.#now = now;
+    this.#limits = limits;
+    this.#memoryMb = memoryMb;
     if (saved && Array.isArray(saved.spaces)) {
       for (const space of saved.spaces) {
-        this.#spaces.set(space.id, { ...space, targets: [...space.targets] });
+        this.#spaces.set(space.id, {
+          ...space,
+          targets: [...space.targets],
+          lastActivity: space.lastActivity ?? this.#now(),
+        });
       }
       this.#nextId = Math.max(saved.nextId || 1, this.#maxId() + 1);
     }
@@ -50,13 +82,16 @@ export class TaskSpaceRegistry {
     for (const space of this.#spaces.values()) {
       const lost = space.targets.filter((targetId) => !live.has(targetId));
       if (lost.length > 0) {
-        // Remember what was open, so the agent learns why its Pages are gone.
+        // Remember what was open, so the agent learns why its Pages are gone
+        // and the tabs can be reopened.
         space.lostTabs = lost.map(
           (targetId) => space.tabUrls?.[targetId] ?? "",
         );
       }
       space.tabUrls = {};
       space.targets = space.targets.filter((targetId) => live.has(targetId));
+      // A space whose every tab is gone is stale until it gets a new tab.
+      if (lost.length > 0 && space.targets.length === 0) space.stale = true;
       if (!live.has(space.activeTargetId)) {
         space.activeTargetId = space.targets.at(-1) ?? null;
       }
@@ -91,11 +126,16 @@ export class TaskSpaceRegistry {
     return space ? structuredClone(space) : null;
   }
 
-  /** A new space opens with one default blank tab, as in ego lite. */
-  async createTaskSpace(name, profileId) {
+  /**
+   * A new space opens with one default blank tab, as in ego lite.
+   * @param {{ ttlMs?: number }} [options]
+   */
+  async createTaskSpace(name, profileId, options = {}) {
     if (profileId && profileId !== "default" && profileId !== "Default") {
       return egoError("Profile not found", "EGO_PROFILE_NOT_FOUND");
     }
+    const ttl = checkTtl(options.ttlMs);
+    if (ttl.error) return ttl.error;
     // Names are unique, as in ego lite. Two agents that start the same task
     // at once must end up in one space, not two.
     for (const existing of this.#spaces.values()) {
@@ -106,6 +146,17 @@ export class TaskSpaceRegistry {
         );
       }
     }
+    const limits = this.#limits();
+    const agentSpaces = [...this.#spaces.values()].filter(
+      (space) => space.ownership === "agent",
+    ).length;
+    if (limits.maxTaskSpaces > 0 && agentSpaces >= limits.maxTaskSpaces) {
+      return resourceLimit(
+        `${agentSpaces} agent task spaces are open (limit ${limits.maxTaskSpaces})`,
+      );
+    }
+    const pageLimit = this.#pageLimit(null);
+    if (pageLimit) return pageLimit;
     const space = {
       id: this.#nextId++,
       name,
@@ -118,13 +169,18 @@ export class TaskSpaceRegistry {
       state: "",
       targets: [],
       activeTargetId: null,
+      createdAt: this.#now(),
+      lastActivity: this.#now(),
     };
+    if (ttl.value !== undefined) space.ttlMs = ttl.value;
     this.#spaces.set(space.id, space);
     const tab = await this.createTab(space.id, "about:blank");
     if (tab.error_code) {
       this.#spaces.delete(space.id);
       this.#changed();
-      return egoError(tab.error, "EGO_BROWSER_UNAVAILABLE");
+      return tab.error_code === "EGO_RESOURCE_LIMIT"
+        ? tab
+        : egoError(tab.error, "EGO_BROWSER_UNAVAILABLE");
     }
     return descriptor(space);
   }
@@ -135,6 +191,7 @@ export class TaskSpaceRegistry {
     space.ownership = "agent";
     space.control = "agent";
     space.controlReason = null;
+    space.lastActivity = this.#now();
     if (typeof name === "string" && name.length > 0) space.name = name;
     this.#changed();
     return descriptor(space);
@@ -153,12 +210,14 @@ export class TaskSpaceRegistry {
     return `${id} task space closed.`;
   }
 
+  /** finish(): the space goes to the user; its memo store is cleared. */
   completeTaskSpace(id) {
     const space = this.#spaces.get(id);
     if (!space) return notFound(id);
     if (space.control === "user") return userInControl(space);
     space.ownership = "user";
     space.state = "";
+    delete space.memo;
     this.#changed();
     return `${id} task space completed.`;
   }
@@ -168,6 +227,7 @@ export class TaskSpaceRegistry {
     if (!space) return notFound(id);
     space.control = "user";
     space.controlReason = reason;
+    space.lastActivity = this.#now();
     this.#changed();
     if (space.activeTargetId) {
       await this.#browser.activateTarget(space.activeTargetId).catch(() => {});
@@ -181,6 +241,7 @@ export class TaskSpaceRegistry {
     if (space.ownership !== "agent") return inactive(id);
     space.control = "agent";
     space.controlReason = null;
+    space.lastActivity = this.#now();
     this.#changed();
     return `${id} has been taken over by the agent.`;
   }
@@ -196,6 +257,8 @@ export class TaskSpaceRegistry {
   async createTab(id, url) {
     const gate = this.gate(id);
     if (gate) return gate;
+    const limit = this.#pageLimit(id);
+    if (limit) return limit;
     const space = this.#spaces.get(id);
     const anchor = space.activeTargetId ?? space.targets.at(-1);
     let targetId;
@@ -263,6 +326,7 @@ export class TaskSpaceRegistry {
     if (!space.targets.includes(targetId)) space.targets.push(targetId);
     space.activeTargetId = targetId;
     delete space.lostTabs;
+    delete space.stale;
     this.#changed();
   }
 
@@ -287,6 +351,137 @@ export class TaskSpaceRegistry {
     if (touched) this.#changed();
   }
 
+  /** Record use of a space; `gc` measures idle time from here. */
+  touch(id) {
+    const space = this.#spaces.get(id);
+    if (!space) return;
+    const now = this.#now();
+    const unsaved = now - (space.lastActivity ?? 0) >= ACTIVITY_SAVE_MS;
+    space.lastActivity = now;
+    if (unsaved) this.#save(this.snapshotState());
+  }
+
+  /**
+   * Read (`hasValue` false) or write one memo entry. A value of null deletes
+   * the key. The store is JSON, at most MAX_MEMO_BYTES per space.
+   */
+  memo(id, key, value, hasValue) {
+    const gate = this.gate(id);
+    if (gate) return gate;
+    if (
+      typeof key !== "string" ||
+      key.length === 0 ||
+      key.length > MAX_MEMO_KEY
+    ) {
+      return egoError(
+        `memo key must be a string of 1-${MAX_MEMO_KEY} characters`,
+        "EGO_INVALID_ARGUMENT",
+      );
+    }
+    const space = this.#spaces.get(id);
+    const store = space.memo ?? {};
+    if (!hasValue) {
+      return { found: Object.hasOwn(store, key), value: store[key] ?? null };
+    }
+    const next = { ...store };
+    if (value === null) delete next[key];
+    else next[key] = value;
+    const size = Buffer.byteLength(JSON.stringify(next));
+    if (size > MAX_MEMO_BYTES) {
+      return egoError(
+        `memo store of task space ${id} would be ${size} bytes (limit ${MAX_MEMO_BYTES})`,
+        "EGO_RESOURCE_LIMIT",
+      );
+    }
+    space.memo = next;
+    this.#changed();
+    return { found: value !== null, value };
+  }
+
+  /**
+   * Reopen the http(s) tabs a browser restart closed. GET only, by design:
+   * a form POST is never replayed. Other URLs are reported, not opened.
+   */
+  async restoreTabs(id) {
+    const gate = this.gate(id);
+    if (gate) return gate;
+    const space = this.#spaces.get(id);
+    const lost = [...(space.lostTabs ?? [])];
+    const tabs = [];
+    const skipped = [];
+    for (const url of lost) {
+      if (!/^https?:\/\//i.test(url)) {
+        skipped.push(url);
+        continue;
+      }
+      const tab = await this.createTab(id, url);
+      if (tab.error_code) return { ...tab, tabs, skipped };
+      tabs.push(tab);
+    }
+    if (this.#spaces.has(id)) {
+      delete this.#spaces.get(id).lostTabs;
+      delete this.#spaces.get(id).stale;
+      this.#changed();
+    }
+    return { tabs, skipped };
+  }
+
+  /** Use against the limits, for `ego-browser status`. */
+  usage() {
+    const spaces = [...this.#spaces.values()];
+    return {
+      taskSpaces: spaces.length,
+      agentTaskSpaces: spaces.filter((space) => space.ownership === "agent")
+        .length,
+      pages: spaces.reduce((sum, space) => sum + space.targets.length, 0),
+      memoryMb: this.#memoryMb(),
+    };
+  }
+
+  /**
+   * Close agent spaces idle past their TTL. Never touches user-owned spaces.
+   * A space handed to the user waits; when nobody can see the browser
+   * (`handOffVisible` false) it returns to the agent after handOffTtlMs.
+   * @returns {Promise<{ id: number, name: string, action: "closed" | "returned", idleMs: number }[]>}
+   */
+  async gc({ dryRun = false, handOffVisible = false } = {}) {
+    const limits = this.#limits();
+    const now = this.#now();
+    const actions = [];
+    for (const space of [...this.#spaces.values()]) {
+      if (space.ownership !== "agent") continue;
+      const idleMs = now - (space.lastActivity ?? now);
+      if (space.control === "user") {
+        if (!handOffVisible && idleMs >= limits.handOffTtlMs) {
+          actions.push({
+            id: space.id,
+            name: space.name,
+            action: "returned",
+            idleMs,
+          });
+          if (!dryRun) {
+            space.control = "agent";
+            space.controlReason = null;
+            space.lastActivity = now;
+            this.#changed();
+          }
+        }
+        continue;
+      }
+      const ttl = space.ttlMs ?? limits.defaultTtlMs;
+      if (ttl > 0 && idleMs >= ttl) {
+        actions.push({
+          id: space.id,
+          name: space.name,
+          action: "closed",
+          idleMs,
+        });
+        if (!dryRun) await this.closeTaskSpace(space.id);
+      }
+    }
+    return actions;
+  }
+
   /** Saved state, with the last known URL of each tab. */
   snapshotState() {
     return {
@@ -305,6 +500,39 @@ export class TaskSpaceRegistry {
     };
   }
 
+  /** EGO_RESOURCE_LIMIT when one more page would pass a limit, else null. */
+  #pageLimit(id) {
+    const limits = this.#limits();
+    const space = id === null ? null : this.#spaces.get(id);
+    if (
+      space &&
+      limits.maxPagesPerSpace > 0 &&
+      space.targets.length >= limits.maxPagesPerSpace
+    ) {
+      return resourceLimit(
+        `task space ${id} has ${space.targets.length} pages (limit ${limits.maxPagesPerSpace})`,
+      );
+    }
+    const pages = [...this.#spaces.values()].reduce(
+      (sum, each) => sum + each.targets.length,
+      0,
+    );
+    if (limits.maxTotalPages > 0 && pages >= limits.maxTotalPages) {
+      return resourceLimit(
+        `${pages} pages are open in all task spaces (limit ${limits.maxTotalPages})`,
+      );
+    }
+    if (limits.maxRssMb > 0) {
+      const memory = this.#memoryMb();
+      if (memory !== null && memory >= limits.maxRssMb) {
+        return resourceLimit(
+          `the browser uses ${memory} MB (limit ${limits.maxRssMb} MB)`,
+        );
+      }
+    }
+    return null;
+  }
+
   #maxId() {
     let max = 0;
     for (const id of this.#spaces.keys()) max = Math.max(max, id);
@@ -315,6 +543,26 @@ export class TaskSpaceRegistry {
     this.#save(this.snapshotState());
     this.#onChange();
   }
+}
+
+function checkTtl(ttlMs) {
+  if (ttlMs === undefined || ttlMs === null) return {};
+  if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0 || ttlMs > MAX_TTL_MS) {
+    return {
+      error: egoError(
+        `ttlMs must be a whole number of milliseconds from 1 to ${MAX_TTL_MS}`,
+        "EGO_INVALID_ARGUMENT",
+      ),
+    };
+  }
+  return { value: ttlMs };
+}
+
+function resourceLimit(detail) {
+  return egoError(
+    `Resource limit reached: ${detail}. Close Pages you no longer need, or run \`ego-browser gc\`.`,
+    "EGO_RESOURCE_LIMIT",
+  );
 }
 
 function descriptor(space) {
