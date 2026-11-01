@@ -1753,7 +1753,34 @@ class TaskSpace {
     const pages: Page[] = [];
     let next = 0;
     try {
-      for (let i = 0; i < workers; i += 1) pages.push(await this.newPage());
+      for (let i = 0; i < workers; i += 1) {
+        try {
+          pages.push(await this.newPage());
+        } catch (error) {
+          // The host refuses more Pages (EGO_RESOURCE_LIMIT) or the Page
+          // budget is used up: run with the Pages already open.
+          if (pages.length > 0 && isPageCapacityError(error)) {
+            bufferOutput(
+              `[ego-browser] task.map: the browser host allowed ${pages.length} of ${workers} Pages (${(error as Error)?.message || error}); running ${pages.length} at a time.\n`,
+            );
+            break;
+          }
+          if (isPageCapacityError(error)) {
+            const code = (error as { error_code?: string })?.error_code;
+            throw attachHint(
+              Object.assign(
+                new Error(
+                  `task.map could not open a Page: ${(error as Error)?.message || error}`,
+                  { cause: error },
+                ),
+                { error_code: code ?? "EGO_PAGE_BUDGET_REACHED" },
+              ),
+              "Close Pages you no longer need (await page.close()) or finish old task spaces, then run task.map again; a lower concurrency does not help when no Page can open.",
+            );
+          }
+          throw error;
+        }
+      }
       await Promise.all(
         pages.map(async (page) => {
           while (next < urls.length) {
@@ -5352,6 +5379,18 @@ function configuredPageBudget(): number {
 function tilePath(path: string, n: number): string {
   const match = /^(.*?)(\.[a-z0-9]+)?$/i.exec(path)!;
   return `${match[1]}-${n}${match[2] || ".png"}`;
+}
+
+/** The host or the Page budget refused another Page. */
+function isPageCapacityError(error: unknown): boolean {
+  const code = (error as { error_code?: unknown })?.error_code;
+  return (
+    code === "EGO_RESOURCE_LIMIT" ||
+    code === "EGO_PAGE_BUDGET_REACHED" ||
+    /Page budget reached|Resource limit reached/.test(
+      String((error as Error)?.message || ""),
+    )
+  );
 }
 
 /** Mark the focused field (through shadow roots and frames) as a secret. */

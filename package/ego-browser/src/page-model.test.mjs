@@ -7156,6 +7156,49 @@ test("task.map runs every URL on reused Pages and reports failures", async () =>
   });
 });
 
+test("task.map runs with fewer Pages when the host refuses more", async () => {
+  await withFixture(async (fixture) => {
+    let created = 0;
+    const limit = (allowed) =>
+      taskForRound(fixture, "round-a", {
+        async createTab(url) {
+          if (created >= allowed) {
+            throw Object.assign(
+              new Error(
+                "Resource limit reached: task space 7 has 1 pages (limit 1).",
+              ),
+              {
+                error_code: "EGO_RESOURCE_LIMIT",
+              },
+            );
+          }
+          created += 1;
+          return fixture.services.createTab(url);
+        },
+      });
+    const urls = ["https://example.test/a", "https://example.test/b"];
+    const results = await limit(1).map(urls, async (page, url) => url, {
+      concurrency: 3,
+    });
+    assert.deepEqual(
+      results.map((result) => result.ok),
+      [true, true],
+      "every URL still runs on the one Page the host allowed",
+    );
+
+    created = 0;
+    await assert.rejects(
+      () => limit(0).map(urls, async () => 1),
+      (error) => {
+        assert.match(error.message, /^task\.map could not open a Page:/);
+        assert.equal(error.error_code, "EGO_RESOURCE_LIMIT");
+        assert.match(error.hint, /Close Pages you no longer need/);
+        return true;
+      },
+    );
+  });
+});
+
 /** Answer isolated-world extraction calls with fixed values. */
 function isolatedServices(fixture, answers) {
   const evaluations = [];
