@@ -96,6 +96,16 @@ export class TaskSpaceRegistry {
     if (profileId && profileId !== "default" && profileId !== "Default") {
       return egoError("Profile not found", "EGO_PROFILE_NOT_FOUND");
     }
+    // Names are unique, as in ego lite. Two agents that start the same task
+    // at once must end up in one space, not two.
+    for (const existing of this.#spaces.values()) {
+      if (existing.name === name) {
+        return egoError(
+          `Task space name already in use: ${name} (id ${existing.id})`,
+          "EGO_TASK_SPACE_NAME_IN_USE",
+        );
+      }
+    }
     const space = {
       id: this.#nextId++,
       name,

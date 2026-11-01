@@ -799,6 +799,47 @@ test("useOrCreateTaskSpace reports a user-owned name as EGO_TASK_SPACE_NAME_IN_U
   assert.deepEqual(calls, [["listTaskSpaces"]]);
 });
 
+test("useOrCreateTaskSpace joins the space another agent created first", async () => {
+  const calls = [];
+  let listed = 0;
+  await withEgo(
+    {
+      async listTaskSpaces() {
+        calls.push(["listTaskSpaces"]);
+        listed += 1;
+        // The other agent's space appears after this one listed.
+        return {
+          taskSpaces:
+            listed === 1
+              ? []
+              : [{ taskId: "race", id: 4, name: "race", ownership: "agent" }],
+        };
+      },
+      async createTaskSpace(name) {
+        calls.push(["createTaskSpace", name]);
+        return {
+          error: `Task space name already in use: ${name}`,
+          error_code: "EGO_TASK_SPACE_NAME_IN_USE",
+        };
+      },
+      useTaskSpace(id) {
+        calls.push(["useTaskSpace", id]);
+        return id;
+      },
+    },
+    async () => {
+      const descriptor = await useOrCreateTaskSpace("race");
+      assert.equal(descriptor.id, 4);
+    },
+  );
+  assert.deepEqual(calls, [
+    ["listTaskSpaces"],
+    ["createTaskSpace", "race"],
+    ["listTaskSpaces"],
+    ["useTaskSpace", 4],
+  ]);
+});
+
 test("taskSpace reports a user-owned name as EGO_TASK_SPACE_NAME_IN_USE", async () => {
   const calls = [];
   await withEgo(userOwnedCheckoutEgo(calls), async () => {

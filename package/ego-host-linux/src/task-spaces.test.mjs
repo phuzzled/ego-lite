@@ -53,6 +53,17 @@ describe("TaskSpaceRegistry", () => {
     assert.equal(browser.created.length, 0);
   });
 
+  it("rejects a name that another space already has", async () => {
+    await registry.createTaskSpace("work");
+    const [second, third] = await Promise.all([
+      registry.createTaskSpace("work"),
+      registry.createTaskSpace("other"),
+    ]);
+    assert.equal(second.error_code, "EGO_TASK_SPACE_NAME_IN_USE");
+    assert.equal(third.id, 2);
+    assert.equal(registry.listTaskSpaces().taskSpaces.length, 2);
+  });
+
   it("accepts the default profile", async () => {
     const result = await registry.createTaskSpace("work", "Default");
     assert.equal(result.id, 1);

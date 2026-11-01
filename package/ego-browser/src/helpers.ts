@@ -235,7 +235,7 @@ export async function useOrCreateTaskSpace(nameOrId) {
 
 async function resolveTaskSpace(
   nameOrId,
-  options: { select?: boolean; op?: string } = {},
+  options: { select?: boolean; op?: string; afterNameRace?: boolean } = {},
 ) {
   const op = options.op ?? "useOrCreateTaskSpace";
   const spaces = await listTaskSpaces();
@@ -244,9 +244,22 @@ async function resolveTaskSpace(
     if (typeof nameOrId === "number") {
       throw new Error(`task space not found: ${nameOrId}`);
     }
-    return createTaskSpaceResolution(nameOrId, undefined, {
-      select: options.select,
-    });
+    try {
+      return await createTaskSpaceResolution(nameOrId, undefined, {
+        select: options.select,
+      });
+    } catch (error) {
+      // Another agent created the same name between the list and the create.
+      // Resolve again, once, so both rounds end up in that one space.
+      if (
+        (error as { error_code?: string })?.error_code !==
+          "EGO_TASK_SPACE_NAME_IN_USE" ||
+        options.afterNameRace
+      ) {
+        throw error;
+      }
+      return resolveTaskSpace(nameOrId, { ...options, afterNameRace: true });
+    }
   }
   if (isAgentOwned(existing.ownership)) {
     return {
