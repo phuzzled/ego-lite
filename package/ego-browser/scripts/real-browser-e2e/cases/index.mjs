@@ -56,6 +56,9 @@ import {
   pageDelayedPopupResumeCase,
   pageDelayedPopupScheduleCase,
 } from "./page-delayed-popup.mjs";
+import { pageSnapshotStatsCase } from "./page-snapshot-stats.mjs";
+import { pageSettleCase } from "./page-settle.mjs";
+import { pageNetworkResponsesCase } from "./page-network-responses.mjs";
 import { runtimeCase } from "./runtime.mjs";
 import { runtimeRegressionCase } from "./runtime-regression.mjs";
 import { eventIsolationCase } from "./event-isolation.mjs";
@@ -199,6 +202,9 @@ export const e2eCases = [
     body: pageDelayedPopupResumeCase,
     forbiddenOutput: "[ego-browser:pages]",
   },
+  { name: "Page snapshot stats and warning", body: pageSnapshotStatsCase },
+  { name: "Page waitForSettled", body: pageSettleCase, timeoutMs: 60_000 },
+  { name: "Page network responses", body: pageNetworkResponsesCase },
   { name: "v1 and v2 action parity", body: v1V2ActionParityCase },
   { name: "portable keyboard workflow", body: portableKeyboardWorkflowCase },
   { name: "Page keyboard interface", body: pageKeyboardInterfaceCase },

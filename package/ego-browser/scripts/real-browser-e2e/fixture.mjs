@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 
+import { handleAgentFixture } from "./agent-fixture.mjs";
+
 export async function closeFixtureServer(fixtureServer) {
   await new Promise((resolve) => {
     const timer = setTimeout(resolve, 1000);
@@ -23,6 +25,12 @@ export async function startFixtureServer(taskName) {
   const snapshotFrameRequests = new Map();
   const fixtureServer = createServer((req, res) => {
     const url = new URL(req.url || "/", "http://127.0.0.1");
+    if (
+      url.pathname.startsWith("/agent/") &&
+      handleAgentFixture(url, req, res)
+    ) {
+      return;
+    }
     if (url.pathname === "/healthz") {
       res.writeHead(200, {
         "content-type": "application/json",
