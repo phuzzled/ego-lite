@@ -11,6 +11,8 @@
 ## Navigation
 - Use `openOrReuseTab` with `https://www.google.com/search?q=...`
 - Results load immediately, no infinite scroll on first page
+- Automated traffic can be redirected to `/sorry/` with a CAPTCHA and no
+  results; `search_and_extract` throws in that case instead of returning `[]`
 - Pagination links at bottom: `a[href*="/search?q="]`
 
 ## Common selectors
