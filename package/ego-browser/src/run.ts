@@ -9,6 +9,7 @@ import { attachHint } from "./ego-errors.js";
 import { formatCliLogValue } from "./format.js";
 import * as helpers from "./helpers.js";
 import { addPageContextHint } from "./page-context-guard.js";
+import { formatLintWarnings, lintScript } from "./script-lint.js";
 import {
   bufferOutput,
   createRoundConsole,
@@ -81,6 +82,11 @@ export async function runMain(options: RunMainOptions = {}) {
     write(stderr, USAGE);
     return 2;
   }
+
+  // Lint warnings go to stderr before the round starts, so they never mix
+  // with the script's own output and never block it.
+  const warnings = formatLintWarnings(lintScript(code));
+  if (warnings) write(stderr, warnings);
 
   await execute(code, stdout);
   return 0;

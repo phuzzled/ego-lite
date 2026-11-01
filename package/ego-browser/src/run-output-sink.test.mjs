@@ -381,3 +381,25 @@ test("the direct CLI prints an error's hint on its own line after the stack", ()
     /matched 0 elements\n(?: {4}at .*\n)+ {2}hint: Take a new snapshot/,
   );
 });
+
+test("lint warnings go to stderr before the run and never block it", async () => {
+  const result = await runScript(
+    `const page = { url: async () => "x" };\nconsole.log(String(page.url()));\ncliLog("ran");`,
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, "[object Promise]\nran\n");
+  assert.equal(
+    result.stderr,
+    "[ego-browser:lint] line 2: page.url() returns a Promise. Write await page.url().\n",
+  );
+});
+
+test("a lint-disable first line silences the lint", async () => {
+  const result = await runScript(
+    `// ego-browser-lint-disable\nconst page = { url: async () => "x" };\nString(page.url());`,
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stderr, "");
+});
