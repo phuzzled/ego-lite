@@ -18,6 +18,10 @@ Chrome or Chromium:
   the page and all its frames.
 - `src/display.mjs`, `src/viewer.mjs` — a virtual display and a noVNC viewer
   for hand-off on a server.
+- `src/profiles.mjs`, `src/browser-pool.mjs`, `src/cdp-router.mjs` — profiles:
+  one browser per persistent profile, and the routing of a round's CDP to it.
+- `src/cookies.mjs`, `src/secrets.mjs` — login import and export, and
+  origin-bound secrets.
 
 ## Install
 
@@ -67,8 +71,143 @@ ego-browser view [--stop]                # one-time noVNC link to the virtual di
 ego-browser relay <id>                   # screenshot + snapshot of a space, for the user
 ego-browser restore <id>                 # reopen the tabs a browser restart closed
 ego-browser service install [--display virtual] [--no-enable] | uninstall | status
+ego-browser profiles [create <id> [--name <name>] | remove <id>]
+ego-browser cookies export --profile <id> --sites <a.com,...> --out <file>
+                       [--local-storage <https://origin,...>] [--force]
+ego-browser cookies import --profile <id> --in <file>
+ego-browser cookies import-chrome --from <chrome profile dir> --profile <id>
+                       --sites <a.com,...> [--keyring] [--dry-run]
+ego-browser secret set <name> --origin <https://site> [--origin ...]
+ego-browser secret list | remove <name>
 ego-browser upgrade
 ```
+
+## Profiles
+
+A profile is a cookie jar and a login state. Pick one when the task space is
+created; the space stays in it.
+
+| Profile           | What it is                                                 | Where                                    |
+| ----------------- | ---------------------------------------------------------- | ---------------------------------------- |
+| `Default`         | the ego lite profile, used when no profile is given        | `~/.local/share/ego-lite/profile`        |
+| `ephemeral`       | throwaway: a new in-memory browser context for each space  | memory only; deleted at `finish()`/close |
+| named (`work`...) | persistent, with its own logins, made by `profiles create` | `~/.local/share/ego-lite/profiles/<id>`  |
+
+```bash
+ego-browser profiles create work --name "Work account"
+ego-browser profiles                      # id, kind, browser running?, spaces, name
+ego-browser profiles remove work          # refuses while a task space uses it
+```
+
+```js
+const work = await taskSpace("inbox", { profileId: "work" });
+const temp = await taskSpace("one-off", { profileId: "ephemeral" });
+```
+
+`ego.listProfiles()` returns `Default` first (`isDefault: true`), then the
+named profiles, then `ephemeral` (with `ephemeral: true`). An unknown id gives
+`EGO_PROFILE_NOT_FOUND`.
+
+How one daemon serves several profiles:
+
+- Chrome holds one `--user-data-dir` per process, so **each named profile
+  runs in its own browser**, with its own DevTools pipe and mux, started the
+  first time a task space (or a cookie import) needs it. The Default browser
+  starts with the daemon, and the daemon still stops when it dies. When a
+  named profile's browser dies, its spaces keep their ids and are marked
+  stale with their URLs, as after a restart (`ego-browser restore <id>`).
+- **Ephemeral** spaces are browser contexts (`Target.createBrowserContext`)
+  inside the Default browser: no extra process. `finish()` deletes the space
+  with its tabs and cookies, whatever Pages it was asked to keep (a notice
+  says so), and an ephemeral space does not survive a daemon restart.
+- A CLI round asks the daemon for each browser it needs. Raw CDP is routed by
+  session, then by tab, then by the selected space's profile, so one script
+  can drive spaces of several profiles side by side.
+- **Limits count across all browsers**: `maxTaskSpaces` and `maxTotalPages`
+  count spaces and pages of every profile, `maxRssMb` is the sum of every
+  browser's memory, and `maxBrowsers` (default 4, Default included) caps the
+  browser processes. `gc` also stops a named profile's browser once no task
+  space and no round uses it.
+- Chrome writes cookies to disk about every 30 seconds; a browser killed
+  within that time loses the newest ones.
+
+## Logins: cookie export and import
+
+On a server nobody can log in through a window. Log in on a desktop, export
+the cookies of the sites you need, and import them on the server:
+
+```bash
+# On the desktop (ego lite profile "work"):
+ego-browser cookies export --profile work --sites github.com,notion.so \
+  --local-storage https://www.notion.so --out ~/work-cookies.json
+scp ~/work-cookies.json me@server:
+# On the server:
+ego-browser cookies import --profile work --in ~/work-cookies.json && rm ~/work-cookies.json
+```
+
+- `--sites` is required: only cookies of those sites (and their subdomains)
+  are exported. `--local-storage` adds the localStorage of the given origins,
+  which must be inside the sites.
+- The file is created with mode 0600 and is never overwritten without
+  `--force`. It holds live sessions: the command prints a warning, and import
+  warns when the file can be read by other users. Cookie values are never
+  printed.
+- Nothing leaves the machine. localStorage is read and written on a hidden
+  tab whose requests are all answered locally (Fetch interception, service
+  workers bypassed), so no request reaches the site.
+- Expired cookies are skipped. Import into a named profile that nothing uses
+  closes its browser afterwards, which writes the cookies to disk at once.
+- `ephemeral` cannot be exported or imported: it lives inside one space.
+
+**From your desktop Chrome or Chromium on the same machine**, only when you run:
+
+```bash
+ego-browser cookies import-chrome --from ~/.config/google-chrome/Default \
+  --profile work --sites github.com
+```
+
+It copies the cookie database to a private temporary folder and reads the
+copy, so your Chrome is not changed or locked. Values Chrome encrypted with
+its built-in Linux key (`v10`, used with `--password-store=basic` or without a
+keyring) are decrypted. Values encrypted with a key from the desktop keyring
+(`v11`, GNOME Keyring or KWallet) are **skipped and counted**; add `--keyring`
+to read that key with `secret-tool lookup application chrome` (or
+`chromium`; `--keyring-app` overrides), which may ask you to unlock the
+keyring. `--dry-run` shows what would be imported. Needs Node.js 22.13+
+(`node:sqlite`).
+
+## Secrets
+
+The user stores a secret once; an agent fills it by name and never sees it.
+
+```bash
+ego-browser secret set github-password --origin https://github.com
+# asks for the value without echo; or: pass show github | ego-browser secret set ...
+ego-browser secret list                   # names and origins, never values
+ego-browser secret remove github-password
+```
+
+```js
+await page.click("loc=role:textbox[name='Password']"); // focus the field
+await ego.fillSecret("github-password"); // { filled: true, secret, origin }
+```
+
+- Stored in `~/.local/share/ego-lite/secrets.json`, mode 0600 in a 0700
+  folder (a looser file is tightened on read). The OS keyring is not used:
+  servers rarely have one unlocked. The value is never taken on the command
+  line, which shell history and `ps` keep.
+- The daemon types the value (`Input.insertText`) into the focused field. It
+  first checks that the field's document is on one of the secret's origins
+  (exact match, https only except localhost), and checks again just before
+  typing. A field inside a frame from another origin is refused.
+- The value never enters the script's process, its output, round logs or the
+  daemon log. Snapshots of a space that had a secret filled are redacted by
+  the daemon (`value="[secret:github-password]"`), and so is `relay`.
+- Errors: `EGO_SECRET_NOT_FOUND`, `EGO_SECRET_ORIGIN_MISMATCH`,
+  `EGO_SECRET_NO_FIELD`.
+- Limit: once typed, the value is in the page. A script that reads the field
+  with `evaluate()` sees it. `fillSecret` stops accidental exposure, not a
+  hostile script.
 
 ## Security model
 
@@ -88,6 +227,9 @@ ego-browser upgrade
 --stop`. Reach it through an SSH tunnel.
 - **Logs** hold action names, timings and error codes; no page content, typed
   text, CDP parameters, or URL paths and queries (navigation shows the origin).
+- **Cookie files and secrets** are 0600 files the user controls; nothing is
+  uploaded. See [Logins](#logins-cookie-export-and-import) and
+  [Secrets](#secrets).
 
 ## Hand-off on a server
 
@@ -106,6 +248,11 @@ handed-off space. Two ways out:
 
    `ego-browser view` prints a new link at any time. Needs `xvfb x11vnc
 novnc` (`EGO_LITE_VIEWER=1` in the installer).
+
+   The virtual display has no window manager, so the daemon arranges windows
+   itself: new windows open at the top-left corner at screen size, and on
+   hand-off the space's tab is brought to the front, from whichever profile's
+   browser holds it, and its window is set to fill the screen.
 
 2. **Screenshot relay.** `ego-browser relay <id>` (or
    `ego.handOffTaskSpace({ relay: true })`) writes a screenshot and a snapshot
@@ -128,7 +275,7 @@ Environment:
 | `EGO_LITE_DEVTOOLS`       | `pipe` (default) or `port` (debugging only)                 |
 | `EGO_LITE_PASSWORD_STORE` | Chrome `--password-store`; default `basic` when headless    |
 | `EGO_LITE_CHROME_ARGS`    | Extra browser flags; quote a value with spaces: `--a="b c"` |
-| `EGO_LITE_PROFILE_DIR`    | Browser profile (default `~/.local/share/ego-lite/profile`) |
+| `EGO_LITE_PROFILE_DIR`    | Default profile (default `~/.local/share/ego-lite/profile`) |
 | `EGO_LITE_NOVNC_DIR`      | noVNC web files (default `/usr/share/novnc`)                |
 
 `~/.config/ego-lite/config.json` (every key optional; read when the daemon
@@ -140,6 +287,7 @@ starts; a limit of 0 turns it off):
   "maxPagesPerSpace": 6,
   "maxTotalPages": 24,
   "maxRssMb": 3072,
+  "maxBrowsers": 4,
   "defaultTtlMs": 86400000,
   "handOffTtlMs": 3600000,
   "gcIntervalMs": 600000,
@@ -148,8 +296,9 @@ starts; a limit of 0 turns it off):
 }
 ```
 
-`maxTaskSpaces` counts agent-owned spaces. `maxRssMb` is the memory of the
-whole browser (proportional set size of its process tree). Past a limit,
+`maxTaskSpaces` counts agent-owned spaces of every profile. `maxRssMb` is the
+memory of every browser (proportional set size of their process trees).
+`maxBrowsers` caps browser processes, one per profile in use. Past a limit,
 `taskSpace()` and `newPage()` fail with `EGO_RESOURCE_LIMIT`.
 
 ## Task-space lifetime
@@ -174,6 +323,11 @@ For the SDK, feature-detected with `ego.getHostCapabilities()`:
 | `taskSpaceMemo(key)` / `(key, value)`                    | `{ found, value }`; null deletes; cleared by `finish()` |
 | `restoreTaskSpaceTabs()`                                 | `{ tabs: [{ targetId, url }], skipped: [url] }`         |
 | `logEvent({ page, action, target, ms, ok, error_code })` | adds a line to the round log                            |
+| `listProfiles()` / `createTaskSpace(name, profileId)`    | named profiles and `ephemeral` (`profiles: true`)       |
+| `fillSecret(name, { targetId?, clear? })`                | `{ filled, secret, origin }` (`fillSecret: true`)       |
+
+`getHostCapabilities()` also reports `ephemeralProfile: true`. A space
+summary pushed to the round carries its `profileId`.
 
 ## Logs
 
@@ -205,12 +359,14 @@ CI runs both on ubuntu-latest, the E2E suite headless and headed under
 
 ## Known gaps
 
-- One profile (`Default`). Task spaces share its cookies and logins.
 - No on-screen hand-off banner. Hand-off and take-over work through the API.
 - Permission prompts (camera, location) do not move control to the user yet.
 - A snapshot shows the page as it is at that moment. Single-page apps can show
   an empty shell right after `goto()`; wait for the content first.
 - Page labels (`p1`) are not restored after a browser restart; that needs the
   SDK's `restorePages`.
-- The virtual display has no window manager; windows of several task spaces
-  stack, and the handed-off space is raised.
+- The virtual display has no window manager. The daemon places and raises
+  windows itself. Windows have no title bars, so the user cannot move or
+  resize them in the viewer.
+- The SDK has no `page.fillSecret()` yet; scripts call `ego.fillSecret()`
+  after focusing the field.
