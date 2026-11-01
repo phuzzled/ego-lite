@@ -25,6 +25,7 @@ export const EGO_ERROR_CODES = [
   "EGO_INVALID_ARGUMENT",
   "EGO_INVALID_RESULT_PAYLOAD",
   "EGO_OPERATION_FAILED",
+  "EGO_RESOURCE_LIMIT",
   "EGO_RESULT_CONVERSION_FAILED",
   "EGO_SNAPSHOT_FAILED",
   "EGO_TASK_HOST_DISCONNECTED",
@@ -333,6 +334,12 @@ const HINTS_BY_CODE: Record<string, string> = {
     "Take a snapshot to see whether the content you need is already there; otherwise retry once with a longer timeout.",
   EGO_PAGE_BUDGET_REACHED:
     "Close Pages you no longer need with await page.close(), then open a new one.",
+  EGO_RESOURCE_LIMIT:
+    "The browser host is at a limit (task spaces, Pages or memory). Close Pages you no longer need with await page.close(), finish old task spaces with await task.finish(), or run `ego-browser gc` (see `ego-browser status`); then retry once.",
+  EGO_UNSUPPORTED_ON_HOST:
+    "This browser host does not offer that feature. Continue without it, or use the Linux host (ego-browser) where it exists.",
+  EGO_SITE_BLOCKED:
+    'The site asked for a human check. Try another source (for search, engine: "bing"), or hand the task space to the user with await task.handOff(). Do not try to bypass the check.',
 };
 
 const HINT_PATTERNS: ReadonlyArray<[RegExp, string]> = [
