@@ -40,7 +40,7 @@ https://github.com/user-attachments/assets/ffe7954b-58ee-411e-b35d-ec30c58a08bc
 
 ## Quick Start
 
-ego lite runs on macOS and Windows, and Linux is on the [roadmap](https://lite.ego.app/roadmap).
+ego lite runs on macOS and Windows. On Linux, the open-source Linux host in this repository gives agents the same `ego-browser` command on stock Chrome or Chromium (see 1.4).
 
 ### 1. Install
 
@@ -76,6 +76,16 @@ Read `skills/ego-browser/references/install.md` and follow the steps to install 
 
 On first launch, ego lite asks one question, whether to migrate your Chrome data. Say yes and your agent inherits your existing logins, cookies, extensions, and bookmarks.
 
+**1.4 Linux (open-source host)**
+
+There is no ego lite app for Linux. Install the Linux host from [`package/ego-host-linux`](package/ego-host-linux/README.md). It needs Node.js 22+ and uses Chrome or Chromium, or downloads Chrome for Testing:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/phuzzled/ego-lite/main/package/ego-host-linux/scripts/install.sh | EGO_LITE_REF=main sh
+```
+
+Without `EGO_LITE_REF=main` it installs the pinned release `linux-v0.1.1`, which predates the one-shot commands, the tool server for agents without a shell, profiles and secrets. [`skills/ego-browser/references/install.md`](skills/ego-browser/references/install.md) has the checksum and troubleshooting. Give your agent [`docs/agent-onboarding.md`](docs/agent-onboarding.md) as its brief: one-shot commands such as `ego-browser read <url>`, the MCP server (`ego-browser mcp`), and the scripting loop.
+
 ### 2. Try your first task
 
 In your agent CLI, type `/ego-browser` followed by a space, then describe what you want in plain language:
@@ -90,32 +100,32 @@ Your browsing data, cookies, and everything else the browser holds stay on your 
 
 ## Highlights of ego lite
 
-| Feature | What it does |
-|---|---|
-| **Code-based, not CLI-based: faster runs on fewer tokens for complex tasks** | The capabilities ego lite exposes to the agent are wrapped as JavaScript functions the agent calls directly. The agent gets to do what it does best: write code, composing a multi-step task into a single output instead of getting stuck in a "call two commands, look at the result, call two more commands" loop. Compared to the conventional CLI approach, complex workflows finish far faster, with higher task success rates, far fewer tool calls per task, and a much lower cost per task. |
-| **A dedicated Space for every agent** | ego lite gives each agent its own fully isolated Space. You browse up front, your agent works in the background, and they don't get in each other's way. You can see which Space has an agent running at any moment, and take it over or stop it whenever you want. |
-| **Your agents multitask in Spaces, parallel workspaces inside the same browser** | Each Space gets its own AI agent or its own task, all running at the same time. Claude Code enriching 10 leads in 10 parallel Spaces. Codex scraping 5 competitor sites in 5 more. They don't collide or steal your tabs. Your mouse stays where you left it. |
-| **The strongest page Snapshot on the market** | Thanks to customization inside the browser engine, ego lite produces the highest-quality page snapshots, the view text-only models rely on to "see" and act on a webpage. It reliably handles tough cases like deeply nested iframes, exactly where other approaches consistently break down. |
-| **Any agent can drive it through `ego-browser`** | `ego-browser` is the connection layer between any agent CLI (Claude Code, Codex, Cursor, or a custom one) and ego lite. It exposes the browser as a set of in-page JavaScript tools: snapshot, fill, click, wait, navigate, capture. The agent writes a JavaScript snippet calling those tools, and `ego-browser` runs it on the page in one pass. |
-| **Experience accumulation that makes your agent faster the more you use it** *(coming soon)* | Most of an agent's time on browser tasks goes to trial and error. ego lite's official Skill distills every successful action into reusable tools and workflows, so similar tasks down the line run up to 5x faster. |
+| Feature                                                                                      | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Code-based, not CLI-based: faster runs on fewer tokens for complex tasks**                 | The capabilities ego lite exposes to the agent are wrapped as JavaScript functions the agent calls directly. The agent gets to do what it does best: write code, composing a multi-step task into a single output instead of getting stuck in a "call two commands, look at the result, call two more commands" loop. Compared to the conventional CLI approach, complex workflows finish far faster, with higher task success rates, far fewer tool calls per task, and a much lower cost per task. |
+| **A dedicated Space for every agent**                                                        | ego lite gives each agent its own fully isolated Space. You browse up front, your agent works in the background, and they don't get in each other's way. You can see which Space has an agent running at any moment, and take it over or stop it whenever you want.                                                                                                                                                                                                                                  |
+| **Your agents multitask in Spaces, parallel workspaces inside the same browser**             | Each Space gets its own AI agent or its own task, all running at the same time. Claude Code enriching 10 leads in 10 parallel Spaces. Codex scraping 5 competitor sites in 5 more. They don't collide or steal your tabs. Your mouse stays where you left it.                                                                                                                                                                                                                                        |
+| **The strongest page Snapshot on the market**                                                | Thanks to customization inside the browser engine, ego lite produces the highest-quality page snapshots, the view text-only models rely on to "see" and act on a webpage. It reliably handles tough cases like deeply nested iframes, exactly where other approaches consistently break down.                                                                                                                                                                                                        |
+| **Any agent can drive it through `ego-browser`**                                             | `ego-browser` is the connection layer between any agent CLI (Claude Code, Codex, Cursor, or a custom one) and ego lite. It exposes the browser as a set of in-page JavaScript tools: snapshot, fill, click, wait, navigate, capture. The agent writes a JavaScript snippet calling those tools, and `ego-browser` runs it on the page in one pass.                                                                                                                                                   |
+| **Experience accumulation that makes your agent faster the more you use it** _(coming soon)_ | Most of an agent's time on browser tasks goes to trial and error. ego lite's official Skill distills every successful action into reusable tools and workflows, so similar tasks down the line run up to 5x faster.                                                                                                                                                                                                                                                                                  |
 
 ## ego lite vs existing products
 
 Most tools can automate a browser. The real questions are what browser the agent gets, whether you can keep working at the same time, and whether the tool is built for the agent you already use or a built-in one.
 
-| Feature | ego lite | Browser extensions<br><sub>Claude/Codex in Chrome</sub> | Built-in browsers<br><sub>Claude/ChatGPT built-in browser</sub> | Cloud browsers<br><sub>Browserbase/Browser Use</sub> | Browser CLIs<br><sub>playwright-cli/Browser Harness</sub> | AI browsers<br><sub>Comet/Dia</sub> |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|
-| Works with any AI agent | ✓ | — | — | ✓ | ✓ | — |
-| Uses your browser logins | ✓ | ✓ | — | — | — | ✓ |
-| Fewer CAPTCHAs | ✓ | ✓ | — | — | — | ✓ |
-| Works across your whole computer | ✓ | — | ✓ | — | ✓ | — |
-| Doesn't hijack your browser | ✓ | — | ✓ | ✓ | — | — |
-| Parallel multitasking | ✓ | — | — | ✓ | — | — |
-| Runs large scraping jobs | ✓ | — | — | ✓ | ✓ | — |
-| Works as your daily browser | ✓ | ✓ | — | — | — | ✓ |
-| Free | ✓ | — | — | — | ✓ | — |
-| Data stored locally | ✓ | ✓ | ✓ | — | ✓ | — |
-| Reusable skills (coming soon) | ✓ | — | — | — | — | — |
+| Feature                          | ego lite | Browser extensions<br><sub>Claude/Codex in Chrome</sub> | Built-in browsers<br><sub>Claude/ChatGPT built-in browser</sub> | Cloud browsers<br><sub>Browserbase/Browser Use</sub> | Browser CLIs<br><sub>playwright-cli/Browser Harness</sub> | AI browsers<br><sub>Comet/Dia</sub> |
+| -------------------------------- | :------: | :-----------------------------------------------------: | :-------------------------------------------------------------: | :--------------------------------------------------: | :-------------------------------------------------------: | :---------------------------------: |
+| Works with any AI agent          |    ✓     |                            —                            |                                —                                |                          ✓                           |                             ✓                             |                  —                  |
+| Uses your browser logins         |    ✓     |                            ✓                            |                                —                                |                          —                           |                             —                             |                  ✓                  |
+| Fewer CAPTCHAs                   |    ✓     |                            ✓                            |                                —                                |                          —                           |                             —                             |                  ✓                  |
+| Works across your whole computer |    ✓     |                            —                            |                                ✓                                |                          —                           |                             ✓                             |                  —                  |
+| Doesn't hijack your browser      |    ✓     |                            —                            |                                ✓                                |                          ✓                           |                             —                             |                  —                  |
+| Parallel multitasking            |    ✓     |                            —                            |                                —                                |                          ✓                           |                             —                             |                  —                  |
+| Runs large scraping jobs         |    ✓     |                            —                            |                                —                                |                          ✓                           |                             ✓                             |                  —                  |
+| Works as your daily browser      |    ✓     |                            ✓                            |                                —                                |                          —                           |                             —                             |                  ✓                  |
+| Free                             |    ✓     |                            —                            |                                —                                |                          —                           |                             ✓                             |                  —                  |
+| Data stored locally              |    ✓     |                            ✓                            |                                ✓                                |                          —                           |                             ✓                             |                  —                  |
+| Reusable skills (coming soon)    |    ✓     |                            —                            |                                —                                |                          —                           |                             —                             |                  —                  |
 
 ## Benchmarks
 
