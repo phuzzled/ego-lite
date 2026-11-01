@@ -88,6 +88,16 @@ test("a clean run flushes buffered cliLog output in order", async () => {
   assert.equal(result.stdout, "one\ntwo\n");
 });
 
+test("a static import explains how to import instead", async () => {
+  const result = await runScript(
+    `import { readFile } from "node:fs/promises";\ncliLog("x");`,
+  );
+  const message = String(result.error?.message ?? result.stderr);
+
+  assert.match(message, /Cannot use import statement/);
+  assert.match(message, /await import\("node:fs\/promises"\)/);
+});
+
 test("help() prints its text without an explicit log", async () => {
   const result = await runScript(`help("TaskSpace.newPage");`);
 

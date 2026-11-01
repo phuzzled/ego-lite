@@ -11,7 +11,7 @@ import {
   isEgoError,
   rejectionFrom,
 } from "./errors.mjs";
-import { HOST_VERSION } from "./paths.mjs";
+import { HOST_VERSION, daemonLogFile } from "./paths.mjs";
 import { captureSnapshot, validateSnapshotOptions } from "./snapshot.mjs";
 
 const NOT_SELECTED = () =>
@@ -23,11 +23,11 @@ const NOT_SELECTED = () =>
  * @param {{ wsUrl: string, spaces: object[] }} options.hello
  */
 export async function createEgoBindings({ control, hello }) {
-  const raw = await CdpConnection.connect(hello.wsUrl);
+  const raw = await connectBrowser(control, hello);
   let internal = null;
   const internalConnection = async () => {
     if (!internal || internal.closed) {
-      internal = await CdpConnection.connect(hello.wsUrl);
+      internal = await connectBrowser(control, hello);
     }
     return internal;
   };
@@ -247,6 +247,33 @@ export async function createEgoBindings({ control, hello }) {
     },
   });
   return ego;
+}
+
+/**
+ * Connect to the browser endpoint. When that fails, ask the daemon again:
+ * hello checks the browser and returns the endpoint it is using now.
+ */
+export async function connectBrowser(control, hello) {
+  try {
+    return await CdpConnection.connect(hello.wsUrl);
+  } catch (first) {
+    const fresh = await control.call("hello").catch(() => null);
+    if (fresh?.wsUrl) {
+      try {
+        const connection = await CdpConnection.connect(fresh.wsUrl);
+        hello.wsUrl = fresh.wsUrl;
+        return connection;
+      } catch {
+        // Fall through to the error below.
+      }
+    }
+    throw Object.assign(
+      new Error(
+        `${first.message}. Run \`ego-browser stop\`, then run the script again. Log: ${daemonLogFile()}`,
+      ),
+      { error_code: "EGO_BROWSER_UNAVAILABLE" },
+    );
+  }
 }
 
 function summariesById(list = []) {

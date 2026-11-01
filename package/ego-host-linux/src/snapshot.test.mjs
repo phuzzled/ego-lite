@@ -134,6 +134,24 @@ describe("renderSnapshot", () => {
     ]);
   });
 
+  it("drops text that repeats its parent's name through a wrapper", () => {
+    const heading = ax("heading", "Jobs", {
+      props: [["level", 2]],
+      children: [ax("generic", "", { children: [ax("StaticText", "Jobs")] })],
+    });
+    const result = renderSnapshot([pageContext(page(heading))]);
+    assert.deepEqual(lines(result), ["root", '  heading "Jobs" level=2']);
+  });
+
+  it("strips icon-font glyphs and gives such names no role locator", () => {
+    const button = ax("button", "Sort ", {
+      children: [ax("StaticText", "")],
+    });
+    const result = renderSnapshot([pageContext(page(button))]);
+    assert.deepEqual(lines(result), ["root", '  button "Sort" [ref=1]']);
+    assert.ok(!("loc" in result.refs[0]));
+  });
+
   it("replaces an unnamed single-child container with the child", () => {
     const inner = ax("heading", "H", { props: [["level", 2]] });
     const wrapper = ax("generic", "", { children: [inner] });

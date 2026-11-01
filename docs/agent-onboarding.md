@@ -106,9 +106,18 @@ EOF
 
 - **One task space per goal.** Never open a new space to escape a stuck page.
   Fix it in the same space, or stop and ask the user.
-- **Reuse pages.** A new space already has page `p1`. Use `page.goto()`
-  instead of new pages. `task.page("p9")` never creates a page; use
-  `await task.newPage()`.
+- **Reuse pages.** A new space already has page `p1` on `about:blank`. Use
+  `p1.goto()` first. Call `await task.newPage()` only when you need a second
+  page open at the same time; otherwise `p1` stays as an empty extra tab.
+  `task.page("p9")` never creates a page.
+- **No static `import`.** The script is the body of an async function, not a
+  module. Write `const fs = await import("node:fs/promises")`.
+- **`goto()` is not an HTTP response.** It resolves to a receipt
+  (`{ popups?, dialog? }`) with no `status`. Check `await page.url()`,
+  `await page.title()` or a snapshot. Use `page.fetch()` for a status code.
+- **Every Page method is async.** `url()`, `title()`, `info()` and
+  `snapshot()` return Promises. Write `await page.url()`; without `await` you
+  print `[object Promise]`.
 - **It is not Playwright.** Use only the documented API. No `locator()`,
   `getByRole()`, `expect()` or `route()`. When the API does not cover it, use
   `page.evaluate()` or `page.cdp()`.
@@ -119,6 +128,25 @@ EOF
   does not run in your working directory and does not get your env vars.
 - **Wait for a result, not for time.** Use `waitForURL()`, `waitForSelector()`
   or `waitForFunction()`. Avoid `waitForTimeout()`.
+- **App pages draw after they load.** On single-page apps (job boards, admin
+  tools, dashboards) `goto()` returns when the empty shell has loaded. A
+  snapshot taken then can show only filters and headings, with no rows, and it
+  does not warn you. Before the snapshot, wait for the content you need:
+
+  ```js
+  await page.goto(url);
+  await page.waitForFunction(
+    () => document.querySelectorAll("h2").length > 3,
+    undefined,
+    { timeout: 20_000 },
+  );
+  console.log(await page.snapshot({ scope: "full_page" }));
+  ```
+
+  Do not rely on `waitUntil: "networkidle"` for these apps: many poll the
+  server and never go quiet. If a snapshot looks too short, wait and take it
+  again before you conclude the data is missing.
+
 - **All times are milliseconds.**
 - **Observe cheaply.** Snapshot for structure, screenshot for looks. Do not take
   both by default. Stop when the page clearly shows the result.
@@ -126,6 +154,9 @@ EOF
   `EGO_TASK_SPACE_USER_IN_CONTROL` mean stop. Do not retry or work around them.
 - **Never type secrets you were not given for this task.** For a login the user
   must do, hand off (section 7).
+- **Always end with `finish()`.** A space stays open until you call
+  `task.finish()`. A run that throws leaves its space open on purpose, so you
+  can resume it. When you give up on a task, close its space (section 8).
 
 ## 6. API cheat sheet
 
@@ -254,7 +285,13 @@ Chrome in the background for you.
 ego-browser status     # is the background browser running?
 ego-browser start      # start it (nodejs starts it for you if needed)
 ego-browser stop       # stop it
+ego-browser spaces     # list task spaces: id, owner, tab count, name
+ego-browser close 12   # close task space 12 (several ids are fine)
+ego-browser close --all  # close every space the agent controls
 ```
+
+`close --all` never closes a space that the user owns or controls. After a
+failed run, the CLI names any task space that run left open.
 
 - **No screen = headless.** With no `DISPLAY` or `WAYLAND_DISPLAY`, Chrome runs
   with no window. The user cannot see or click it, so a hand-off cannot work
@@ -291,18 +328,23 @@ ego-browser stop       # stop it
 
 ## 10. When things go wrong
 
-| You see                               | Do                                                                                                                     |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `ego-browser: command not found`      | Install (section 2).                                                                                                   |
-| `Unknown command: skill`              | The app is too old. Ask the user to run `ego-browser upgrade`.                                                         |
-| `SyntaxError: await is only valid...` | The shell broke the script. Use a `.mjs` file. Do not wrap it in an async function.                                    |
-| Selector matched 0 or many            | Take a new snapshot. Use a ref or a more exact `loc=`.                                                                 |
-| Old `@N` ref fails                    | The page changed. Take a new snapshot.                                                                                 |
-| `EGO_TASK_SPACE_USER_IN_CONTROL`      | The user has control. Stop and wait for them.                                                                          |
-| `EGO_TASK_SPACE_NOT_FOUND` / inactive | Print `await listTaskSpaces()`. Ask the user before you claim one.                                                     |
-| `EGO_TASK_SPACE_NAME_IN_USE`          | The user owns a space with that name. Ask, or pick another name.                                                       |
-| Output has `[ego-browser:notice]`     | Finish the task. Tell the user an update exists. Upgrade only with their yes.                                          |
-| Cannot connect (Linux)                | `ego-browser status`, then read `~/.local/state/ego-lite/daemon.log`. Try `ego-browser stop` then `ego-browser start`. |
+| You see                                                         | Do                                                                                                                                            |
+| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ego-browser: command not found`                                | Install (section 2).                                                                                                                          |
+| `Unknown command: skill`                                        | The app is too old. Ask the user to run `ego-browser upgrade`.                                                                                |
+| `SyntaxError: await is only valid...`                           | The shell broke the script. Use a `.mjs` file. Do not wrap it in an async function.                                                           |
+| Selector matched 0 or many                                      | Take a new snapshot. Use a ref or a more exact `loc=`.                                                                                        |
+| Old `@N` ref fails                                              | The page changed. Take a new snapshot.                                                                                                        |
+| `EGO_TASK_SPACE_USER_IN_CONTROL`                                | The user has control. Stop and wait for them.                                                                                                 |
+| `EGO_TASK_SPACE_NOT_FOUND` / inactive                           | Print `await listTaskSpaces()`. Ask the user before you claim one.                                                                            |
+| `EGO_TASK_SPACE_NAME_IN_USE`                                    | The user owns a space with that name. Ask, or pick another name.                                                                              |
+| Output has `[ego-browser:notice]`                               | Finish the task. Tell the user an update exists. Upgrade only with their yes.                                                                 |
+| `EGO_BROWSER_UNAVAILABLE` / "Cannot connect to browser" (Linux) | The CLI already retried once. Run `ego-browser stop`, then run the script again. Read `~/.local/state/ego-lite/daemon.log` if it fails again. |
+| Snapshot has the page frame but no rows                         | The app has not drawn them yet. Wait for the rows (section 5), then take the snapshot again.                                                  |
+| `Cannot use import statement outside a module`                  | Use `await import("node:...")` instead of `import ... from`.                                                                                  |
+| `resp.status` is `undefined` after `goto()`                     | `goto()` returns a receipt, not a response. Use `page.fetch()` for a status.                                                                  |
+| `[object Promise]` in your output                               | You forgot `await` on a Page method such as `url()`.                                                                                          |
+| Old task spaces pile up (Linux)                                 | `ego-browser spaces`, then `ego-browser close <id>` or `ego-browser close --all`.                                                             |
 
 Before you clear cookies, cache or storage, read
 `references/clearing-state.md` in the ego-browser Skill folder. Some clears

@@ -5,6 +5,7 @@
  *   ego-browser nodejs [--sdk-path <index.js>] [-e <code>]   run a script (stdin by default)
  *   ego-browser skill  [--sdk-path <index.js>]               print the usage guide
  *   ego-browser start | stop | status                        manage the browser daemon
+ *   ego-browser spaces | close <id...> | close --all         list or close task spaces
  *   ego-browser upgrade                                      how to update ego lite
  */
 import { spawn } from "node:child_process";
@@ -31,6 +32,9 @@ Usage:
   ego-browser nodejs [--sdk-path <index.js>] -e "<script>"
   ego-browser skill [--sdk-path <index.js>]
   ego-browser start | stop | status
+  ego-browser spaces                 list task spaces
+  ego-browser close <id> [<id>...]   close task spaces
+  ego-browser close --all            close every agent-controlled task space
   ego-browser upgrade
 `;
 
@@ -54,6 +58,10 @@ async function main(argv) {
       return stopDaemon();
     case "status":
       return printStatus();
+    case "spaces":
+      return printSpaces();
+    case "close":
+      return closeSpaces(rest);
     case "upgrade":
       process.stdout.write(
         "Re-run the ego lite Linux installer to upgrade:\n  sh skills/ego-browser/scripts/install.sh\n",
@@ -122,10 +130,13 @@ async function runNodejs({ sdkPath, code, rest }) {
   }
   const source = code ?? (await readStdin());
 
-  const control = await connectDaemon();
-  const hello = await control.call("hello");
+  const { control, hello } = await connectWithHello();
   const ego = await createEgoBindings({ control, hello });
   globalThis.ego = ego;
+  // The SDK keys Page labels by browser run. It cannot use its parent process
+  // here, because each agent command has a new parent shell.
+  process.env.EGO_BROWSER_INSTANCE_ID = hello.instanceId;
+  const spacesBefore = new Set(hello.spaces.map((space) => space.id));
 
   let exitCode = 1;
   let module;
@@ -136,6 +147,9 @@ async function runNodejs({ sdkPath, code, rest }) {
   } catch (error) {
     process.stderr.write(`${error?.stack || error?.message || error}\n`);
     exitCode = 1;
+  }
+  try {
+    if (exitCode !== 0) await reportOpenSpaces(control, spacesBefore);
   } finally {
     if (typeof module?.disposeEgoSdk === "function") {
       await module.disposeEgoSdk(globalThis).catch(() => {});
@@ -156,6 +170,101 @@ function readStdin() {
     process.stdin.on("end", () => resolveText(data));
     process.stdin.on("error", reject);
   });
+}
+
+/** Connect and say hello. A daemon with a dead browser stops; start anew. */
+async function connectWithHello() {
+  let control = await connectDaemon();
+  try {
+    return { control, hello: await control.call("hello") };
+  } catch {
+    control.close();
+    await new Promise((done) => setTimeout(done, 500));
+    control = await connectDaemon();
+    return { control, hello: await control.call("hello") };
+  }
+}
+
+/** After a failed run, name the task spaces it left open. */
+async function reportOpenSpaces(control, spacesBefore) {
+  const result = await control.call("listTaskSpaces").catch(() => null);
+  const opened = (result?.taskSpaces || []).filter(
+    (space) => space.ownership === "agent" && !spacesBefore.has(space.id),
+  );
+  for (const space of opened) {
+    process.stderr.write(
+      `[ego-browser] task space ${space.id} ("${space.name}") is still open. Resume it with taskSpace(${space.id}), or close it with: ego-browser close ${space.id}\n`,
+    );
+  }
+}
+
+async function printSpaces() {
+  let control;
+  try {
+    control = await ControlClient.connect(controlSocketPath());
+  } catch {
+    process.stdout.write("ego lite daemon is not running\n");
+    return 1;
+  }
+  const { taskSpaces } = await control.call("listTaskSpaces");
+  const tabs = await Promise.all(
+    taskSpaces.map((space) =>
+      control.call("listTabs", { id: space.id }).catch(() => null),
+    ),
+  );
+  control.close();
+  if (taskSpaces.length === 0) {
+    process.stdout.write("no task spaces\n");
+    return 0;
+  }
+  process.stdout.write("id\towner\ttabs\tname\n");
+  taskSpaces.forEach((space, index) => {
+    const count = tabs[index]?.tabs?.length ?? "?";
+    process.stdout.write(
+      `${space.id}\t${space.ownership}\t${count}\t${space.name}\n`,
+    );
+  });
+  return 0;
+}
+
+async function closeSpaces(args) {
+  const all = args.includes("--all");
+  const ids = args.filter((arg) => arg !== "--all").map(Number);
+  if ((!all && ids.length === 0) || ids.some((id) => !Number.isInteger(id))) {
+    process.stderr.write(`close needs task space ids or --all\n${USAGE}`);
+    return 2;
+  }
+  let control;
+  try {
+    control = await ControlClient.connect(controlSocketPath());
+  } catch {
+    process.stdout.write("ego lite daemon is not running\n");
+    return 1;
+  }
+  if (all) {
+    const { taskSpaces } = await control.call("listTaskSpaces");
+    // Spaces the user owns or controls stay open.
+    ids.push(
+      ...taskSpaces
+        .filter((space) => space.ownership === "agent")
+        .map((space) => space.id),
+    );
+  }
+  let code = 0;
+  for (const id of ids) {
+    const result = await control.call("closeTaskSpace", { id });
+    if (typeof result === "string") {
+      process.stdout.write(`${result}\n`);
+    } else {
+      process.stderr.write(
+        `${id}: not closed (${result?.error_code || "error"}: ${result?.error})\n`,
+      );
+      code = 1;
+    }
+  }
+  control.close();
+  if (ids.length === 0) process.stdout.write("no agent task spaces to close\n");
+  return code;
 }
 
 /** Connect to the daemon, starting it in the background when needed. */
@@ -182,7 +291,8 @@ async function connectDaemon(timeoutMs = 40_000) {
     try {
       return await ControlClient.connect(socketPath);
     } catch {
-      if (child.exitCode !== null) break;
+      // Exit code 0: another daemon won the start race; keep waiting for it.
+      if (child.exitCode) break;
     }
   }
   throw Object.assign(

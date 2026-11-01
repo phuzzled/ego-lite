@@ -48,8 +48,16 @@ type PageLedgerStoreOptions = {
 
 const DEFAULT_STALE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
 
-/** Stable across Agent rounds and Node-service restarts in one Ego Lite run. */
-export function runtimeInstanceId(parentPid = process.ppid): string {
+/**
+ * Stable across Agent rounds and Node-service restarts in one Ego Lite run.
+ * A host that does not run the SDK as a child of the browser (the Linux host)
+ * sets EGO_BROWSER_INSTANCE_ID instead.
+ */
+export function runtimeInstanceId(
+  parentPid = process.ppid,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  if (env.EGO_BROWSER_INSTANCE_ID) return env.EGO_BROWSER_INSTANCE_ID;
   return `browser-host:${parentPid}`;
 }
 

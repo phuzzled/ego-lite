@@ -4,18 +4,22 @@
 # Chrome for Testing system libraries.
 #
 #   sh package/ego-host-linux/scripts/install.sh            from a checkout
-#   EGO_LITE_REF=main sh install.sh                          download the source
+#   sh install.sh                                            download the pinned release
 #
 # Environment:
 #   EGO_LITE_REPO   GitHub repo to download when not run from a checkout
 #                   (default phuzzled/ego-lite)
-#   EGO_LITE_REF    branch or tag to download (default main)
+#   EGO_LITE_REF    tag, branch or commit to download (default: the pinned
+#                   release tag below; use main for the newest code)
+#   EGO_LITE_SHA256 expected SHA-256 of the downloaded source archive; the
+#                   install stops when it does not match
 #   EGO_LITE_CHROME_FOR_TESTING=1  always download Chrome for Testing
 
 set -eu
 
 REPO="${EGO_LITE_REPO:-phuzzled/ego-lite}"
-REF="${EGO_LITE_REF:-main}"
+RELEASE_TAG="linux-v0.1.1"
+REF="${EGO_LITE_REF:-$RELEASE_TAG}"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/ego-lite"
 HOST_DIR="$DATA_DIR/host"
 BIN_DIR="$HOME/.local/bin"
@@ -65,9 +69,24 @@ download_source() {
 	url="https://codeload.github.com/$REPO/tar.gz/$REF"
 	log "Downloading $url ..."
 	mkdir -p "$TEMP_DIR/src"
-	curl -fL --retry 3 "$url" | tar -xz -C "$TEMP_DIR/src" --strip-components=1 ||
+	curl -fL --retry 3 --output "$TEMP_DIR/source.tar.gz" "$url" ||
 		die "failed to download $REPO@$REF"
+	sum=$(sha256 "$TEMP_DIR/source.tar.gz")
+	log "Source archive SHA-256: $sum"
+	if [ -n "${EGO_LITE_SHA256:-}" ] && [ "$sum" != "$EGO_LITE_SHA256" ]; then
+		die "checksum mismatch for $REPO@$REF (expected $EGO_LITE_SHA256)"
+	fi
+	tar -xzf "$TEMP_DIR/source.tar.gz" -C "$TEMP_DIR/src" --strip-components=1 ||
+		die "failed to unpack $REPO@$REF"
 	printf '%s\n' "$TEMP_DIR/src"
+}
+
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
 }
 
 build_sdk() {

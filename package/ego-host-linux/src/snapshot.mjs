@@ -63,6 +63,9 @@ const ROLE_ALIASES = {
 
 const DROPPED_ROLES = new Set(["InlineTextBox", "LineBreak", "ListMarker"]);
 
+/** Icon-font glyphs: they print as boxes and carry no meaning. */
+const PRIVATE_USE = /[\uE000-\uF8FF]/g;
+
 /** Roles never advertised as role: locators, because they are renamed here. */
 const NO_ROLE_LOCATOR = new Set([
   "root",
@@ -325,7 +328,7 @@ export function renderSnapshot(contexts, options = {}) {
         hasProperty(node, "focusable") ||
         Boolean(context.layout?.clickable.has(node.backendDOMNodeId)));
     const keptChildren = children.filter(
-      (child) => !(child.role === "text" && child.name === name),
+      (child) => !(name && onlyText(child) === name),
     );
     if (!inView && keptChildren.length === 0 && role !== "root") return [];
     return [
@@ -434,6 +437,8 @@ function stableLocator(item, pageOrigin) {
       : undefined;
   }
   if (!item.name || NO_ROLE_LOCATOR.has(item.role)) return undefined;
+  // The page's own name still has the glyphs, so a cleaned name won't match.
+  if (/[\uE000-\uF8FF]/.test(axValue(item.node.name) || "")) return undefined;
   const key = `role\u0000${item.role}\u0000${item.name}`;
   return item.context.locatorCounts.get(key) === 1
     ? `role:${item.role}[name=${JSON.stringify(item.name)}]`
@@ -528,7 +533,14 @@ function axValue(value) {
 
 function cleanText(text) {
   if (typeof text !== "string") return "";
-  return text.replace(/\s+/g, " ").trim();
+  return text.replace(PRIVATE_USE, "").replace(/\s+/g, " ").trim();
+}
+
+/** The text a node shows when it is only text, through unnamed wrappers. */
+function onlyText(item) {
+  if (item.role === "text") return item.name;
+  if (item.role !== "container" || item.name || item.interactive) return null;
+  return item.children.length === 1 ? onlyText(item.children[0]) : null;
 }
 
 function snapshotError(message) {

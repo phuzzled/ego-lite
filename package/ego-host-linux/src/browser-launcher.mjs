@@ -88,6 +88,11 @@ export async function launchBrowser(env = process.env, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) {
+      if (stderrTail.includes("ProcessSingleton")) {
+        throw new Error(
+          `Another browser is using the ego lite profile ${userDataDir}. Stop it (for example: pkill -f '${userDataDir}') and try again.`,
+        );
+      }
       throw new Error(
         `Browser exited during start (code ${child.exitCode}): ${stderrTail}`,
       );

@@ -7,11 +7,18 @@ import { join } from "node:path";
 import { PageLedgerStore, runtimeInstanceId } from "../dist/src/page-ledger.js";
 
 test("runtimeInstanceId is a pure browser-host identifier", () => {
-  const first = runtimeInstanceId(42);
-  const second = runtimeInstanceId(42);
+  const first = runtimeInstanceId(42, {});
+  const second = runtimeInstanceId(42, {});
 
   assert.equal(second, first);
   assert.equal(first, "browser-host:42");
+});
+
+test("runtimeInstanceId prefers a host-provided instance id", () => {
+  assert.equal(
+    runtimeInstanceId(42, { EGO_BROWSER_INSTANCE_ID: "linux-host:7" }),
+    "linux-host:7",
+  );
 });
 
 async function withTempLedger(fn) {

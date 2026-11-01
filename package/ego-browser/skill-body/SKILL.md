@@ -93,8 +93,10 @@ Node.js APIs belong in the script; Page globals such as `window`, `document`,
 `location`, and DOM APIs do not. Put browser-side JavaScript inside
 `page.evaluate()`. Do not import Playwright or launch another browser.
 
-The Node.js runtime uses ESM. When a script needs local files, load built-ins
-with dynamic imports such as `await import("node:fs/promises")`. The script
+The script runs as the body of an async function, not as a module, so a
+static `import ... from` line is a syntax error. When a script needs local
+files, load built-ins with dynamic imports such as
+`const fs = await import("node:fs/promises")`. The script
 does not run in your shell's working directory, so use absolute paths for every
 file it reads or writes. It also does not inherit your shell's environment
 variables: `process.env` will not contain values you set before running
@@ -189,7 +191,8 @@ as user-owned when deciding whether a Page may be closed.
 
 ## Page operations
 
-ego-browser provides the following Page API:
+ego-browser provides the following Page API. Every method returns a Promise,
+including `url()`, `title()`, and `info()`: write `await page.url()`.
 
 - State and observation: `label`, `spaceId`, `openedBy`, `targetId`, `url()`,
   `title()`, `info()`, `snapshot()`, `screenshot()`
@@ -209,6 +212,11 @@ ego-browser provides the following Page API:
 `page.evaluate()` callbacks run only inside the Page; they cannot read variables
 or Node.js modules from the surrounding script. Define browser-side helpers
 inside the callback or pass one JSON-serializable value as its second argument.
+
+`goto()`, `reload()`, and the element actions resolve to an action receipt
+(`{ popups?, dialog? }`), not an HTTP response, so there is no `status`. Check
+the result with `url()`, `title()`, a wait, or a snapshot. Use `page.fetch()`
+when you need an HTTP status.
 
 Work efficiently:
 
@@ -349,7 +357,8 @@ position and resolves when that motion completes. In each script invocation, mov
 click over the intended scrollable area before using it.
 
 On macOS and Windows, `keyboard.paste()` sends the native paste shortcut and
-then restores the user's clipboard. Pass `{ text, html }` when a rich editor
+then restores the user's clipboard. On the Linux host it pastes through the
+browser clipboard and restores it the same way. Pass `{ text, html }` when a rich editor
 needs structured clipboard content; `text` is the plain-text fallback. On other
 platforms, use `keyboard.insertText()` for plain text.
 

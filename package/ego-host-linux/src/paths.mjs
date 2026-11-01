@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const HOST_VERSION = "0.1.0-linux";
+export const HOST_VERSION = "0.1.1-linux";
 
 const HOME = homedir();
 

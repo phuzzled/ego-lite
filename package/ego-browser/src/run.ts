@@ -114,9 +114,15 @@ async function execute(code: string, stdout: WritableLike) {
   flushSink(stdout, false);
 }
 
+const IMPORT_HINT =
+  '\nBrowser scripts run as a function body, not a module, so static import is not available. Use a dynamic import instead, such as: const fs = await import("node:fs/promises");';
+
 function userScriptSyntaxError(code: string, original: unknown): SyntaxError {
   const originalMessage =
     original instanceof Error ? original.message : String(original);
+  const hint = /Cannot use import statement/.test(originalMessage)
+    ? IMPORT_HINT
+    : "";
   try {
     // V8 omits source locations for Function-constructor syntax errors. Acorn
     // only runs after compilation fails and recovers the location in the
@@ -135,12 +141,14 @@ function userScriptSyntaxError(code: string, original: unknown): SyntaxError {
       const error = new SyntaxError(
         `Browser script syntax error at line ${userLineNumber}, column ${columnNumber}: ${originalMessage}\n` +
           `${userLineNumber} | ${sourceLine}\n` +
-          `${" ".repeat(String(userLineNumber).length + 3 + location.column)}^`,
+          `${" ".repeat(String(userLineNumber).length + 3 + location.column)}^` +
+          hint,
       );
       (error as SyntaxError & { cause?: unknown }).cause = original;
       return error;
     }
   }
+  if (hint) return new SyntaxError(originalMessage + hint);
   return original instanceof SyntaxError
     ? original
     : new SyntaxError(originalMessage);
