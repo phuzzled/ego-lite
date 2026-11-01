@@ -1,21 +1,19 @@
 ---
-version: "2.1.0"
-date: "2026-10-08"
+version: "2.2.0"
+date: "2026-11-01"
 ---
 
 # ego-browser
 
-Call `help()` or `help("page.click")` to print signatures and uncommon options
-of APIs named below; it prints by itself, so do not wrap it in `console.log`.
-For installation or connection problems, read `references/install.md` in the
-ego-browser Skill directory.
+Call `help()` or `help("page.click")` to print signatures, options and return
+values of the APIs below; it prints by itself, so do not wrap it in
+`console.log`. For installation or connection problems, read
+`references/install.md` in the ego-browser Skill directory.
 
 ## Run browser scripts
 
-Pass the script to `ego-browser nodejs`. The form depends on the shell that runs
-the command: heredoc is Bash/Zsh syntax and does not exist in PowerShell or cmd.
-
-### Bash, Zsh, Git Bash
+Pass the script to `ego-browser nodejs`. Heredoc is Bash/Zsh syntax; it does
+not exist in PowerShell or cmd.
 
 ```bash
 ego-browser nodejs <<'EOF'
@@ -28,9 +26,8 @@ console.log(await page.snapshot());
 EOF
 ```
 
-When a sandbox blocks heredoc input, use `-e` instead. Use single quotes around
-the code and double quotes for JavaScript strings; single quotes within the code
-require shell quoting.
+When a sandbox blocks heredoc input, use `-e` with single quotes around the
+code and double quotes for JavaScript strings:
 
 ```bash
 ego-browser nodejs -e '
@@ -40,344 +37,317 @@ console.log(task.spaceId);
 '
 ```
 
-### PowerShell
-
-PowerShell has no heredoc, and Windows PowerShell 5.1 drops the double quotes
-inside an argument when it calls a native program, which splits the script into
-several arguments. Do not pass a script that contains double quotes or spans
-several lines to `-e`. Write it to a UTF-8 `.mjs` file instead and evaluate an
-ASCII-only one-line entry point, which needs no double quotes of its own:
+**PowerShell** has no heredoc, and Windows PowerShell 5.1 drops double quotes
+inside native arguments. Write the script to a UTF-8 `.mjs` file and evaluate
+an ASCII-only entry point. Use forward slashes in the URL, and keep non-ASCII
+text inside the file. Do not pipe the file with `Get-Content`, which corrupts
+non-ASCII text on 5.1.
 
 ```powershell
 ego-browser nodejs -e "await import('file:///C:/Users/<name>/ego/task.mjs')"
 ```
 
-The imported module runs with the same helpers and `console` as an inline
-script, so the whole task belongs in the `.mjs` file. Use forward slashes in the
-`file:///` URL. Non-ASCII content such as Chinese text must stay inside the
-file: never put it in a `-e` argument.
+**cmd** supports input redirection: `ego-browser nodejs < C:\Users\<name>\ego\task.mjs`.
 
-Do not pipe the file in with `Get-Content`. Windows PowerShell 5.1 reads a UTF-8
-file as ANSI and sends ASCII to native programs, which corrupts non-ASCII text
-and truncates strings. PowerShell has no `<` input redirection either.
+With script files, write a new complete file for every round (`round-01.mjs`,
+`round-02.mjs`) in a directory named for the goal and time; editing an old
+round replays old steps. Create files with your file tool, not PowerShell
+`Set-Content` or `>`.
 
-### cmd
+`SyntaxError: await is only valid in async functions...` means the shell
+damaged the script. Do not wrap it in an async IIFE or open a new task space;
+switch to the `.mjs` file form.
 
-cmd has no heredoc, but it does support input redirection, so it can run the
-same `.mjs` file directly:
+### Script rules
 
-```bat
-ego-browser nodejs < C:\Users\<name>\ego\task.mjs
-```
-
-### Later rounds with a script file
-
-Each run is a new process, and earlier rounds have already run. Write a new,
-complete file for every round (`round-01.mjs`, `round-02.mjs`, ...) instead of
-editing the previous one, which would replay old steps. Keep one goal's files in
-a new directory named for the goal plus the date and time, such as
-`C:/Users/<name>/ego/laptop-prices-20260922-1405/`, and only run files written
-in this conversation. Create files with your file tool, not PowerShell
-`Set-Content`, `Out-File`, or `>`, which write ANSI or UTF-16 on 5.1.
-
-### When the script fails to parse
-
-`SyntaxError: await is only valid in async functions and the top level bodies of
-modules` almost always means the shell damaged the script before Node received
-it; top-level `await` itself is supported. Do not wrap the code in an async
-IIFE, open a new task space, or resend the same command. Switch to the `.mjs`
-file form above.
-
-The script always runs in Node.js, not in the web Page. Browser helpers and
-Node.js APIs belong in the script; Page globals such as `window`, `document`,
-`location`, and DOM APIs do not. Put browser-side JavaScript inside
-`page.evaluate()`. Do not import Playwright or launch another browser.
-
-The script runs as the body of an async function, not as a module, so a
-static `import ... from` line is a syntax error. When a script needs local
-files, load built-ins with dynamic imports such as
-`const fs = await import("node:fs/promises")`. The script
-does not run in your shell's working directory, so use absolute paths for every
-file it reads or writes. It also does not inherit your shell's environment
-variables: `process.env` will not contain values you set before running
-`ego-browser`, so write every input directly into the script.
-
-Ego-browser deliberately exposes a small custom API. It is not Playwright, even
-where method names and options look similar. Use only the TaskSpace, Page,
-FileChooser, mouse, and keyboard APIs explicitly listed in this Skill. Do not
-infer Playwright methods such as `locator()`, `getByRole()`, `context()`,
-`expect()`, or `route()`. When the listed API does not cover an operation, use
-the documented `page.evaluate()` or `page.cdp()` escape hatches instead of
-guessing another method.
-
-Only these pointer actions accept an optional `label` option: `click()`,
-`dblclick()`, `hover()`, `dragAndDrop()`, `mouse.click()`, `mouse.move()`, and
-`mouse.wheel()`. Pass a concise 3-6 word description to keep the action text
-next to the visible agent cursor in sync with the action. Other methods, such
-as `fill()`, `press()`, `focus()`, `selectOption()`, `waitForSelector()`,
-`keyboard.*()`, `mouse.down()`, and `mouse.up()`, reject a `label` option.
-The `label` in `selectOption(selector, { label })` is different: it selects the
-option whose visible text matches.
+- The script runs in Node.js as the body of an async function. Top-level
+  `await` works; a static `import` does not: write
+  `const fs = await import("node:fs/promises")`.
+- Helpers are parameters of that function, so declaring one of their names
+  fails with `Identifier '...' has already been declared`. Do not name
+  variables `wait`, `click`, `hover`, `snapshot`, `scroll`, `js`, `cdp`, or
+  `help`.
+- `window`, `document`, and DOM APIs exist only inside `page.evaluate()`.
+- Use absolute paths. The script does not run in your working directory and
+  does not inherit your environment variables.
+- It is not Playwright. Use only the APIs in this guide. Do not infer
+  `locator()`, `getByRole()`, `expect()`, or `route()`; use `page.evaluate()`
+  or `page.cdp()` when the API does not cover an operation.
+- Lines starting `[ego-browser:lint]` are printed before the script runs and
+  flag a likely bug (static import, missing `await`, `.status()` on a receipt,
+  Page globals, Playwright names, `require()`). Fix that line first.
+- Errors print `error_code:` and `hint:` lines, and `status:` for an HTTP error.
+  Do what the hint says before trying anything else. In code, read
+  `error.error_code`, `error.hint`, and `error.status`.
+- Only `click()`, `dblclick()`, `hover()`, `dragAndDrop()`, `mouse.click()`,
+  `mouse.move()`, and `mouse.wheel()` accept `{ label }`, a 3-6 word action
+  description shown next to the agent cursor. `selectOption(selector, { label })`
+  instead selects the option with that visible text.
 
 When the user explicitly asks for ego-browser, start with a real browser command
 and diagnose the CLI or installation only if it fails.
 
 ## Spaces, rounds, and pages
 
-- Use exactly one TaskSpace for the entire user goal. Create it once, print its
-  `spaceId`, and resume that same space in later rounds. Use multiple spaces
-  only when the user explicitly requests them.
-- Task space names are unique. `taskSpace(name)` resumes your own space with
-  that name instead of creating a second one. If the name belongs to a
-  user-owned space, it fails with `EGO_TASK_SPACE_NAME_IN_USE`: ask the user
-  whether to work in that space (then `claimTaskSpace(id)`), or pick another
-  name.
-- Never use a new TaskSpace to recover from a stuck, blocked, timed-out, or
-  unexpected Page. Recover within the existing space; if it cannot continue,
-  stop and ask the user.
-- Every invocation starts a new Node.js process. Task spaces, tabs, and Page labels
-  persist; JavaScript variables do not.
-- A new task space starts with Page `p1`; navigate it instead of opening
-  another Page.
-- Reuse a Page with `goto()` instead of opening a new Page for every URL.
+- Use exactly one TaskSpace for the entire user goal. Print its `spaceId` and
+  resume that same space in later rounds. Use several only when the user asks.
+- `taskSpace(name)` resumes your own space with that name. A name held by a
+  user-owned space fails with `EGO_TASK_SPACE_NAME_IN_USE`: ask the user
+  whether to work there (`claimTaskSpace(id)`), or pick another name.
+- Never use a new TaskSpace to recover from a stuck or blocked Page. Recover in
+  the same space, or stop and ask the user.
+- Every invocation starts a new Node.js process. Task spaces, tabs, and
+  Page labels persist; JavaScript variables do not.
+- A new space starts with Page `p1`; navigate it, and reuse Pages with `goto()`.
 - All time values are milliseconds.
 
 ```js
-// Later round: use the space id and Page label printed earlier.
+// Later round: resume with the space id and Page label printed earlier.
 const resumed = await taskSpace(7);
 const source = resumed.page("p1");
-await source.goto("https://example.com/releases");
+await source.goto("https://example.com/");
 ```
 
-Do not inspect or select profiles unless the user explicitly requests a
-particular Ego Lite profile. A `profileId` applies only when creating a space;
-use `help("profiles")` for the exact workflow.
+Options apply when the space is created: `profileId` picks a browser profile
+(list them with `await profiles()`; `"ephemeral"` is an empty cookie jar that
+`finish()` deletes), and `ttlMs` closes the space after that long unused (Linux
+host). Use a profile only when the user names one.
 
-Supported TaskSpace API:
+```js
+const task = await taskSpace("one-off lookup", {
+  profileId: "ephemeral",
+  ttlMs: 600_000,
+});
+```
 
-- State: `spaceId`, `name`, `ownership`, `page(label)`, `userPage()`
-- Pages: `await task.pages()`, `await task.tabs()`, `newPage()`,
-  `adopt(page, { as? })`, `release(label)`
-- Control: `waitForControl(options)`, `handOff()`, `finish({ keep })`
-- Advanced: `cdp(method, params, options)`
+After a browser restart a space keeps its id but loses its tabs. Resume with
+`taskSpace(id, { restorePages: true })`: Pages come back at their last URL with
+their labels; form state is lost. `task.memo(key, value?)` keeps small JSON
+progress notes with the space so a rerun can skip finished steps (`null`
+deletes; `finish()` clears them). Both throw `EGO_UNSUPPORTED_ON_HOST` on hosts
+without them.
 
-Pages receive permanent labels such as `p1`, `p2`, and `p3`. Prefer these labels
-to custom `{ as }` values. Reuse or close Pages as the task proceeds; the runtime
-reports the configured Page budget when it is reached.
+```js
+const task = await taskSpace("price check", { restorePages: true });
+const done = (await task.memo("done")) ?? [];
+await task.memo("done", [...done, "page-1"]);
+```
 
-`task.newPage()` creates another blank Page when multiple Pages must stay open.
-Navigate it separately with `page.goto()`.
+TaskSpace API: `spaceId`, `name`, `ownership`, `profileId`, `page(label)`,
+`userPage()`, `await pages()`, `await tabs()`, `newPage()`,
+`adopt(page, { as? })`, `release(label)`, `map(urls, fn, options)`,
+`memo(key, value?)`, `restorePages()`, `waitForControl()`, `handOff()`,
+`finish({ keep })`, `cdp()`.
 
-`task.page(label)` only refers to a Page that already exists; it never creates
-one, and its handle is always truthy, so `task.page("p2") || await task.newPage()`
-and `if (!page)` do not detect a missing label. Use labels printed by earlier
-output or by `await task.pages()`, and call `await task.newPage()` to create one.
-
-`await task.pages()` returns managed Pages. `await task.tabs()` returns every tab in the
-space as `{ label?, page, targetId, title, url, active, openedBy }`. A tab
-without a label is unmanaged; adopt it before operating:
+`task.page(label)` only refers to an existing Page; it never creates one, and
+its handle is always truthy. Call `await task.newPage()` for another Page.
+`await task.tabs()` lists every tab as
+`{ label?, page, targetId, title, url, active, openedBy }`; a tab without a
+label is unmanaged, so adopt it first:
 
 ```js
 const active = (await task.tabs()).find((item) => item.active);
 if (active && !active.label) {
-  const page = await task.adopt(active.page);
-  console.log({ page: page.label, url: await page.url() });
+  const adopted = await task.adopt(active.page);
+  console.log({ page: adopted.label, url: await adopted.url() });
 }
 ```
 
-`release(label)` returns an unknown-origin Page to the user without closing its
-tab. Close Agent-created Pages with `page.close()`. Treat `openedBy: "unknown"`
-as user-owned when deciding whether a Page may be closed.
+`release(label)` returns an unknown-origin Page to the user without closing it.
+Treat `openedBy: "unknown"` as user-owned.
 
 ## Page operations
 
-ego-browser provides the following Page API. Every method returns a Promise,
-including `url()`, `title()`, and `info()`: write `await page.url()`.
+Every method returns a Promise, including `url()`, `title()`, and `info()`.
 
-- State and observation: `label`, `spaceId`, `openedBy`, `targetId`, `url()`,
-  `title()`, `info()`, `snapshot()`, `screenshot()`
-- Navigation and waits: `goto()`, `reload()`, `waitForURL()`,
-  `waitForEvent()`, `waitForSelector()`, `waitForLoadState()`,
-  `waitForFunction()`, `waitForTimeout()`
+- Read: `read()`, `tables()`, `structuredData()`, `snapshot()`,
+  `screenshot()`, `search()`, `url()`, `title()`, `info()`
+- Navigate and wait: `goto()`, `reload()`, `waitForSettled()`,
+  `waitForURL()`, `waitForSelector()`, `waitForFunction()`,
+  `waitForLoadState()`, `waitForEvent()`, `waitForTimeout()`
+- Network: `waitForResponse()`, `captureResponses()`, `fetch()`
+- Lists: `scrollToLoad()`, `paginate()`; banners: `dismissConsent()`
 - Elements: `click()`, `dblclick()`, `hover()`, `dragAndDrop()`, `fill()`,
-  `selectOption()`, `focus()`, `press()`, `setInputFiles()`,
+  `fillSecret()`, `selectOption()`, `focus()`, `press()`, `setInputFiles()`,
   `waitForFileChooser()`, `close()`
 - Dialogs: `acceptDialog(promptText?)`, `dismissDialog()`
-- Pointer: `mouse.click()`, `move()`, `down()`, `up()`, `wheel()`
-- Keyboard: `keyboard.down()`, `up()`, `press()`, `type()`, `insertText()`,
-  `paste()`
-- Page code and protocols: `evaluate(fnOrString, argument)`,
-  `fetch(url, options)`, `cdp(method, params, options)`
+- Input: `mouse.click/move/down/up/wheel()`,
+  `keyboard.down/up/press/type/insertText/paste()`
+- Code: `evaluate(fnOrString, argument)`, `cdp()`, `site(id)`
 
-`page.evaluate()` callbacks run only inside the Page; they cannot read variables
-or Node.js modules from the surrounding script. Define browser-side helpers
-inside the callback or pass one JSON-serializable value as its second argument.
-
-`goto()`, `reload()`, and the element actions resolve to an action receipt
-(`{ popups?, dialog? }`), not an HTTP response, so there is no `status`. Check
-the result with `url()`, `title()`, a wait, or a snapshot. Use `page.fetch()`
-when you need an HTTP status.
+`goto()`, `reload()`, and element actions resolve to an action receipt
+(`{ popups?, dialog? }`), not an HTTP response. A navigation the server answers
+with 4xx or 5xx throws `EGO_NAVIGATION_HTTP_ERROR` with `error.status`.
 
 Work efficiently:
 
-- Each time you observe, collect only the cheapest page state sufficient to
-  choose the next action. Use a snapshot for semantic or locator ground truth
-  and a screenshot for visual confirmation; do not request both by default.
-- If an action does not produce the expected result, inspect the current page
-  before deciding whether to retry. Do not blindly repeat it or immediately
-  fall back to coordinates or raw CDP.
-- Once the page clearly shows the requested result, stop; do not confirm the
-  same result through multiple surfaces.
+- To read a page, use `page.read()`: Markdown far smaller than a snapshot. Use
+  a snapshot when you need refs to act on, and a screenshot only for visuals.
+- Plan several actions from one observation, then observe once. Print the
+  final snapshot last so the next round can act on it directly.
+- If an action does not give the expected result, inspect the page before
+  retrying. Stop once the page clearly shows the result.
+
+### Read pages, PDFs, tables, and search
+
+```js
+await page.goto("https://en.wikipedia.org/wiki/Web_browser");
+const doc = await page.read({ maxChars: 20_000 });
+console.log(doc.title, doc.words, doc.truncated, doc.warning);
+console.log(doc.markdown);
+```
+
+`read()` returns `{ url, title, markdown, links, words, truncated, source }`;
+`mode: "full"` reads the whole body, `selector` one element. On a PDF URL it
+returns the text with `pages: [{ n, text }]`. For a PDF on disk use
+`await readPdf("/absolute/path/file.pdf")`. A `warning` means very little text:
+wait, then read again or take a snapshot.
+
+```js
+await page.goto("https://en.wikipedia.org/wiki/List_of_largest_cities");
+const [table] = await page.tables({ index: 0 });
+console.log(table.headers, table.rowCount, table.rows[0]);
+await page.tables({ index: 0, saveAs: "/absolute/path/cities.csv" });
+console.log(await page.structuredData()); // JSON-LD, OpenGraph, microdata
+```
+
+```js
+const found = await page.search("rust programming language", { max: 5 });
+console.log(found.engine, found.results, found.blocked, found.warning);
+```
+
+`search()` tries Bing, then DuckDuckGo, then Google. An engine that shows a bot
+check is listed in `blocked`, never returned as empty results; `engine` is
+`null` when all were blocked. `warning` means no result mentions the query.
+Google and DuckDuckGo often block automated browsers.
 
 ### Semantic pages: snapshot and selectors
 
-Prefer snapshots and semantic selectors for ordinary DOM pages. Use screenshots
-and coordinates only when useful DOM semantics are unavailable.
-
-Before choosing an unfamiliar target, take a snapshot. When the current state
-is sufficient to plan several actions on the same Page, complete them in one
-script invocation, then observe the result once. Observe between actions only when an
-intermediate result changes what should happen next. Keep the action sequence,
-the wait for its final expected state, and the next snapshot in the same
-script invocation. Print the snapshot last so the next round can act on it directly.
-The final snapshot is the next round's starting view of the changed page;
-without it, that round usually has to spend a separate browser call observing
-before it can choose the next target, which wastes compute.
-
-Wait for the expected result: use `waitForURL()` for navigation,
-`waitForSelector()` for element state, or `waitForFunction()` for application
-state. Avoid fixed delays when an observable condition exists. A snapshot
-captures the current moment; it does not wait for the page to become stable.
-`page.snapshot()` captures the current viewport. For content outside it, use
-`page.snapshot({ scope: "full_page" })`.
-
-The default viewport snapshot includes visible iframe content returned by the
-browser. To focus on a frame's subtree, reuse the ref printed on its `iframe`
-line:
+A snapshot captures the current moment. On a client-rendered page, wait first:
+`waitForSelector()` when you know the element, `waitForSettled()` when you do
+not, or `snapshot({ settle: true })` for both in one call. `networkidle` does
+not mean the content is drawn.
 
 ```js
-console.log(await page.snapshot({ scope: "subtree", root: "@12" }));
+await page.goto("https://quotes.toscrape.com/js/");
+console.log(await page.snapshot({ settle: { until: ".quote", minCount: 5 } }));
 ```
 
-Use the refs returned by the subtree for actions inside the iframe. A subtree
-snapshot does not scope later locator actions; they still prefer actionable
-matches in the top document before searching frames.
+The snapshot starts with a header line, then
+`[stats nodes=… refs=… text=… readyState=… pendingRequests=… domChanging=…]`.
+A `[warning page may still be rendering]` line means wait and snapshot again
+before you conclude data is missing. `waitForSettled()` never throws; check
+`settled` and `reason`. `format: "object"` returns
+`{ text, stats, warnings, settle }`.
 
-`waitForLoadState()` defaults to `load`. `waitForFunction()` follows the
-Playwright argument order; pass `undefined` before options when there is no Page
-argument:
+The default snapshot covers the viewport, including visible iframe content.
+Use `snapshot({ scope: "full_page" })` for the whole page, or focus on a frame
+with the ref on its `iframe` line:
+`page.snapshot({ scope: "subtree", root: "@12" })`.
 
 ```js
-await page.waitForFunction(() => window.appReady, undefined, {
-  timeout: 10_000,
+// Act on refs and locators from the previous output, then observe once.
+await page.goto("https://quotes.toscrape.com/login");
+await page.fill("#username", "demo");
+await page.fill("#password", "demo");
+await page.click("loc=role:button[name='Login']", { label: "submit login" });
+await page.waitForURL("https://quotes.toscrape.com/");
+console.log(await page.snapshot());
+```
+
+Element actions accept snapshot refs (`@21`), `text=...`, `loc=css:`,
+`loc=role:`, `loc=href:`, `xpath=...`, and raw CSS. A selector must match
+exactly one element. Unquoted `text=` ignores case and matches a substring;
+`text="Save changes"` is exact. Also accepted: `css=...`, terminal
+`:has-text("...")` and `:text-is("...")`, `>> nth=N`, and
+`loc=role:...[name*="..."]`. Refs are short-lived.
+After the page changes, take a new snapshot; use `loc=...` to find an element
+again later. CSS
+searches open shadow roots; actions prefer the top document, then frames.
+`click()`, `fill()`, `hover()`, and `dragAndDrop()` scroll their target into
+view.
+
+`selectOption()` takes a value, `{ label }`, `{ index }`, or an array for a
+multiple select; `null` or `[]` clears it. `waitForFunction()` follows
+Playwright's argument order: pass `undefined` before options when there is no
+Page argument.
+
+### Lists, pages of results, banners, and many URLs
+
+```js
+await page.dismissConsent(); // rejects a cookie banner; never accepts by default
+await page.goto("https://quotes.toscrape.com/scroll");
+const scrolled = await page.scrollToLoad({
+  itemSelector: ".quote",
+  maxItems: 30,
 });
+console.log(scrolled.items, scrolled.stoppedBecause);
+
+await page.goto("https://quotes.toscrape.com/");
+for await (const p of page.paginate({ next: "li.next a", maxPages: 3 })) {
+  console.log(await p.url());
+}
+
+const results = await task.map(
+  ["https://example.com", "https://example.org"],
+  async (p) => p.title(),
+  { concurrency: 2 },
+);
+console.log(results); // [{ url, index, ok, value } | { ok: false, error, error_code }]
 ```
+
+`dismissConsent()` returns `{ found, action }`; pass `prefer: "accept"` only
+when the user asked. `task.map()` reuses up to `concurrency` Pages and closes
+them afterwards; one failure does not stop the others.
+
+### Network responses
+
+Arm `waitForResponse()` before the action that triggers the request; do not
+`await` it first. A string matches as a glob or substring.
 
 ```js
-// Round 1: inspect and choose targets from this output.
-const page = task.page("p1");
-console.log(await page.snapshot());
+const response = page.waitForResponse(/algolia\.net/);
+await page.goto("https://hn.algolia.com/?q=rust");
+const { status, json } = await response;
+console.log(status, json.hits.length);
+
+const capture = await page.captureResponses({ match: /algolia\.net/ });
+await page.fill("input[type=search]", "deno");
+await page.waitForSettled();
+console.log((await capture.stop()).map((r) => [r.status, r.url]));
 ```
 
-```js
-// Next round: act using the previous output, verify, then prepare the next round.
-const page = task.page("p1");
-await page.fill("@21", "user@example.com");
-await page.click("loc=role:button[name='Sign in']");
-await page.waitForSelector("loc=css:#account-home", { state: "visible" });
-console.log(await page.snapshot());
-```
-
-Element actions accept:
-
-- snapshot refs such as `@21` or `ref=21`
-- `text=...` for page content
-- `loc=css:`, `loc=role:`, and `loc=href:` locators
-- `xpath=...`
-- raw CSS selectors
-
-Selector actions require exactly one match. Unquoted text normalizes whitespace,
-ignores case, and matches a substring; quoted text such as
-`text="Save changes"` is exact and case-sensitive.
-
-A small Playwright-compatible selector subset is also accepted: `css=...`,
-terminal `:has-text("...")` and `:text-is("...")`, `>> nth=N` after a CSS,
-text, or href selector (`N` is `-1` or non-negative), plus
-`loc=role:...[name*="..."]` for accessible-name substrings. Other Playwright
-selector syntax is not supported.
-
-When a selector identifies a wrapper, `focus()` and `press()` may use its
-interactive ancestor or unique editable descendant; `fill()` and
-`setInputFiles()` only continue to a unique compatible control.
-
-`click()`, `fill()`, `hover()`, and `dragAndDrop()` automatically bring their
-target into view with browser wheel input. Do not pre-scroll solely to make a
-DOM target actionable.
-
-Snapshot node names are accessibility roles. Use a ref now or `loc=...` to find
-the element again. After the page changes, take a new snapshot. When a useful
-node has no ref, construct a selector from its role, text, or surrounding
-context. CSS searches nested open shadow roots. Actions use an actionable match
-in the top document first, then search frames when the top document has none.
-Multiple actionable matches in the selected document or frame are ambiguous.
-
-Select options by value, visible label, or zero-based index. A string matches
-either value or label; pass an array for a multiple select:
-
-```js
-await page.selectOption("select[name=month]", { label: "October" });
-```
-
-Pass `null` or `[]` to clear the current selection.
+`page.fetch(url, options)` runs `window.fetch()` in the Page with its cookies
+and CORS, and returns `{ ok, status, statusText, url, headers, body }`; add
+`saveAs` to write a binary body to an absolute path. Use Node.js `fetch()` for
+requests that need no browser state.
 
 ### Visual pages: screenshot, mouse, and keyboard
 
-Use a screenshot with mouse and keyboard operations for canvas, rich-text,
-spreadsheets, maps, and other interfaces that lack useful DOM semantics:
+Use screenshots with mouse and keyboard for canvas, rich text, spreadsheets,
+and maps:
 
 ```js
 const path = await page.screenshot({ path: "/absolute/path/before.png" });
 await page.mouse.click(420, 260, { label: "open spreadsheet cell" });
 await page.mouse.wheel(0, 600, { label: "scroll project board" });
 await page.keyboard.paste("hello\tworld");
-console.log({ screenshot: path });
+const tiles = await page.screenshot({ fullPage: true, tiles: true });
+console.log({ screenshot: path, tiles });
 ```
 
-`path` must be absolute; relative paths are rejected. Omit `path` to write
-into the system temporary directory and use the returned file path. On
-Windows, write paths with forward slashes, such as
-`C:/Users/<name>/ego-shots/before.png`, because backslashes are escape
-characters inside JavaScript strings.
-
-Inspect the screenshot with an image-viewing tool. Coordinates use CSS pixels;
-keyboard names and `+`-separated chords follow Playwright syntax. Use
-`ControlOrMeta` for portable shortcuts and verify the resulting page state.
-`mouse.wheel()` performs a short wheel-input motion at the current mouse
-position and resolves when that motion completes. In each script invocation, move or
-click over the intended scrollable area before using it.
-
-On macOS and Windows, `keyboard.paste()` sends the native paste shortcut and
-then restores the user's clipboard. On the Linux host it pastes through the
-browser clipboard and restores it the same way. Pass `{ text, html }` when a rich editor
-needs structured clipboard content; `text` is the plain-text fallback. On other
-platforms, use `keyboard.insertText()` for plain text.
-
-```js
-await page.keyboard.paste({
-  text: "Name\tStatus",
-  html: "<table><tr><td>Name</td><td>Status</td></tr></table>",
-});
-```
-
-For rich-text editors and editable grids, validate a small edit before repeating
-it at scale. Canvas-backed editors may not expose visible content through DOM
-text or selectors; verify those results with a screenshot or an
-application-specific visible state.
+`path` must be absolute; without it the file goes to the temporary directory.
+`fullPage: true` stops at `maxHeight` (16000 CSS px) with a notice;
+`tiles: true` returns several images of up to 4000 px. On Windows, write paths
+with forward slashes. Coordinates are CSS pixels; key names follow Playwright
+(`ControlOrMeta+A`). Move or click over a scrollable area before
+`mouse.wheel()`. `keyboard.paste()` restores the clipboard afterwards and takes
+`{ text, html }` for rich editors. Validate one small edit before repeating it.
 
 ### Page JavaScript and CDP
 
-Use `page.evaluate()` for bulk extraction or complex in-page work. It accepts
-one JSON-serializable argument and returns a JSON-serializable value:
+`page.evaluate()` callbacks run inside the Page and cannot see script
+variables; pass one JSON-serializable argument:
 
 ```js
 const rows = await page.evaluate(
@@ -390,19 +360,14 @@ const rows = await page.evaluate(
 );
 ```
 
-`page.evaluate()` has no timeout option. Keep long work in bounded calls; on a
-safety timeout, use `executionStopped` and `mayHaveLateEffects` to decide
-whether an unsafe follow-up requires reloading or closing the Page first.
+It has no timeout option; keep work bounded. On a safety timeout, check
+`executionStopped` and `mayHaveLateEffects`. `page.cdp()` sends Page, Runtime,
+DOM, Network, or Input commands; `task.cdp()` sends Target and Browser
+commands. Raw CDP invalidates refs. Do not persist `page.targetId`.
 
-Use documented Page methods first. If a wrapper is missing or does not work
-reliably on the current page, use `page.cdp()` as a lower-level path for
-diagnosis or control. It accepts Page, Runtime, DOM, Network, Input, and similar
-commands; use `task.cdp()` for Target and Browser commands. Raw CDP invalidates
-refs. Do not persist `page.targetId` across rounds.
+## Popups and dialogs
 
-## Action receipts, popups, and dialogs
-
-When an action is expected to open a new Page, start the wait before the action:
+Start waiting before an action that opens a new Page:
 
 ```js
 const popupPromise = page.waitForEvent("popup");
@@ -411,147 +376,110 @@ const popupPage = await popupPromise;
 await popupPage.waitForLoadState();
 ```
 
-High-level actions also report immediately observed popups in `receipt.popups`
-as `{ label, targetId }`. Resolve the Page with
-`task.page(receipt.popups[0].label)` and continue there; wait for its URL when
-the destination matters.
+Receipts also list popups seen at once as `receipt.popups: [{ label }]`; use
+`task.page(label)`. A JavaScript dialog appears as `receipt.dialog` or in
+`page.info()`; handle it with `await page.acceptDialog("text")` or
+`await page.dismissDialog()` before continuing. `await page.events()` returns
+and clears buffered protocol events.
 
-For uncommon protocol-event workflows, `await page.events()` returns and clears
-the buffered event array; it is not an EventEmitter.
+A receipt describes only the dispatched action and what was seen at once; it
+does not verify the resulting application state.
 
-A synchronous JavaScript dialog may appear as `receipt.dialog` or in
-`page.info()`. Handle it before continuing:
-
-```js
-await page.acceptDialog("prompt response");
-// Or: await page.dismissDialog();
-```
-
-A receipt describes only the dispatched action and immediate popup or dialog
-observations; it does not verify the resulting application state.
-
-## Files and requests
-
-Set an existing file input with absolute paths:
+## Files, downloads, and secrets
 
 ```js
 await page.setInputFiles("input[type=file]", ["/absolute/path/report.pdf"]);
-```
 
-If a click creates the file input, start waiting before the click:
-
-```js
 const chooserPromise = page.waitForFileChooser({ timeout: 10_000 });
 await page.click("button.upload");
-const chooser = await chooserPromise;
-const result = await chooser.setFiles("/absolute/path/report.pdf");
-```
+await (await chooserPromise).setFiles("/absolute/path/report.pdf");
 
-An upload-triggered JavaScript dialog may be returned as `result.dialog`; when
-present, handle it with the dialog methods above.
-
-For a browser download, arm the event before the triggering action and save the
-returned artifact to an absolute path in the same script:
-
-```js
 const downloadPromise = page.waitForEvent("download", { timeout: 30_000 });
 await page.click("button.download");
 const download = await downloadPromise;
-console.log({
-  url: download.url(),
-  suggestedFilename: download.suggestedFilename(),
-});
 await download.saveAs("/absolute/path/report.pdf");
 ```
 
-`download.saveAs()` waits for completion and creates missing parent
-directories. `download.path()` returns the round-local temporary file;
-`failure()`, `cancel()`, and `delete()` manage its lifecycle. Temporary download
-files are removed when the SDK round is disposed, so call `saveAs()` before the
-script ends. Do not set a global download directory with raw CDP; each download
-wait configures and restores only the addressed Page session.
+`saveAs()` waits for completion and creates parent directories. Temporary
+download files are removed when the round ends, so save in the same script.
+A download also has `url()`, `suggestedFilename()`, `path()`, `failure()`,
+`cancel()`, and `delete()`. An upload may return `{ dialog }`; handle it as
+above.
 
-`page.fetch()` runs `window.fetch()` in the Page: relative URLs, cookies, and
-service workers use that Page, and browser CORS still applies. It returns
-`{ ok, status, statusText, url, headers, body }`:
-
-```js
-const response = await page.fetch("/api/items", {
-  method: "POST",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify({ limit: 20 }),
-  timeout: 10_000,
-});
-```
-
-Save binary responses without converting them to text:
+On hosts with a secret store (Linux), the user stores a password once with
+`ego-browser secret set <name> --origin https://site`. Fill it by name; the
+value never reaches your script, and snapshots redact it:
 
 ```js
-await page.fetch("/image.png", { saveAs: "/absolute/path/image.png" });
+await page.goto("https://the-internet.herokuapp.com/login");
+console.log(await page.fillSecret("#password", "demo-login"));
 ```
 
-Use standard Node.js `fetch()` for background requests that do not need Page
-browser semantics.
+It is typed only on the origins the secret was stored for. Never ask for a
+password in chat; on `EGO_SECRET_NOT_FOUND`, ask the user to store it.
+
+## Site tools
+
+Some sites have tested tools. Before writing extraction code for a site, list
+them, then run one with a Page:
+
+```js
+console.log(await siteTools("en.wikipedia.org"));
+const summary = await page
+  .site("wikipedia")
+  .run("summary", { title: "Rust (programming language)" });
+console.log(summary.extract);
+```
+
+`siteTools()` with no argument lists every site; `page.site(id).notes()` reads
+how the site works. A tool marked `// v1 only` runs with `runSiteTool()`.
 
 ## User control and completion
 
-Stop when the user takes control or the space is inactive or unassigned. Do not
-retry or route around the stop. Permission prompts, device choosers, and
-other browser-owned prompts require the user to handle them.
+Stop when the user takes control or the space is inactive. Do not
+retry or route around the stop. Permission prompts and other browser-owned prompts need the
+user. When a site shows a bot check or CAPTCHA, never try to solve or avoid it:
+use another source or hand off.
 
 When the user must act in the browser, call `await task.handOff()`, end the
-round, and explain what they should do. After the user confirms, resume the
-same space:
+round, and say what to do. After the user confirms, resume the same space:
 
 ```js
 const task = await takeOverTaskSpace(7);
 const userPage = task.userPage();
 ```
 
-Adopt `userPage` if it is unmanaged. Use `waitForControl()` only when the current
-script must wait in place. Claim a user-owned or inactive space only when the
-user explicitly asks; this includes a space you finished with kept Pages, which
-`takeOverTaskSpace()` cannot resume. Find its numeric id first; names may be
-duplicated. `listTaskSpaces()` entries expose that id as `id` (`spaceId` exists
-only on a TaskSpace handle), so pass `entry.id` to `claimTaskSpace()` or
-`taskSpace()`:
+Adopt `userPage` if it is unmanaged. Use `waitForControl()` only to wait in
+place. On a Linux server without a screen, nobody can see a handed-off space:
+`handOff()` warns, and prints a viewer link only when the browser runs on a
+virtual display. To keep control and show the user the page instead, use a
+relay:
 
 ```js
-const spaces = await listTaskSpaces();
-console.log(spaces.filter((space) => space.ownership === "user"));
-
-const task = await claimTaskSpace(7);
-const userPage = task.userPage();
+const { relay } = await task.handOff({ relay: true });
+console.log(relay.screenshot, relay.snapshot);
 ```
 
-When the task succeeds, close the TaskSpace by default with
-`await task.finish({ keep: [] })`. Call `finish()` exactly once and wait for it
-to resolve before reporting completion.
+Show the user the screenshot, then do what they say in later rounds.
 
-`finish()` ends the task and all of its Page labels, including Pages kept for the
-user. Put it last in the final round only; do not operate any Page after it in
-the same script or in later rounds.
+Claim a user-owned or inactive space only when the user explicitly asks,
+including a space you finished with kept Pages. Find its numeric
+id with `await listTaskSpaces()` (entries expose `id`, not `spaceId`), then
+`await claimTaskSpace(id)`.
 
-Keeping Pages is a rare exception: retain only necessary Pages when the user
-explicitly asks, or when the result must remain in the browser for the user to
-view or continue working with. Pages merely visited, search results, and
-intermediate steps do not need to remain open.
+When the task succeeds, close the space with `await task.finish({ keep: [] })`;
+`finish()` with no argument means the same.
+Call `finish()` exactly once and wait for it
+to resolve before reporting completion. Put it last in the final
+round; do not use any Page afterwards. Keep Pages only when the user asks or
+must see the result: `await task.finish({ keep: ["p2"] })`. User-created and
+unmanaged tabs are protected. An ephemeral space is always deleted. Do not call
+`finish()` when the task stops for user control or an error; a run that throws
+leaves its space open so you can resume it.
 
-```js
-await task.finish({ keep: [] }); // Default: keep no Agent-managed Pages.
-await task.finish({ keep: ["p2"] }); // Exception: keep only the result Page for the user.
-```
-
-User-created and unmanaged tabs are protected; if any remain, `keep: []` does
-not close the whole space. Do not close unwanted Pages one by one at completion;
-list the Pages to keep instead.
-Use `page.close()` only while the task is still in progress. Do not call
-`finish()` when the task stops for user control or an error.
-
-If the final output contains `[ego-browser:notice]`, finish the current browser
-task, tell the user an Ego Lite update is available, and run
-`ego-browser upgrade` only with their approval. Run `ego-browser skill` again
-after the upgrade.
+If the output contains `[ego-browser:notice]`, finish the task, tell the user
+an Ego Lite update is available, and run `ego-browser upgrade` only with their
+approval. Run `ego-browser skill` again after the upgrade.
 
 ## Clearing cookies, cache, and storage
 
