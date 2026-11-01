@@ -3,6 +3,14 @@
  * CDP. The contract is docs/native-bindings-api.md: argument checks throw
  * TypeError with EGO_INVALID_ARGUMENT, task commands resolve error objects,
  * and ego.snapshot() rejects with an Error that carries error_code.
+ *
+ * Linux-host additions, which the SDK can feature-detect with
+ * `ego.getHostCapabilities()`:
+ * - createTaskSpace(name, profileId?, { ttlMs }) for `gc`;
+ * - handOffTaskSpace({ relay: true }) writes a screenshot and a snapshot
+ *   for the user instead of handing off;
+ * - taskSpaceMemo(key, value?) and restoreTaskSpaceTabs() for re-runs;
+ * - logEvent(entry) adds an action to the round log.
  */
 import { CdpConnection } from "./cdp-connection.mjs";
 import {
@@ -12,15 +20,32 @@ import {
   rejectionFrom,
 } from "./errors.mjs";
 import { HOST_VERSION, daemonLogFile } from "./paths.mjs";
+import { sanitizeEntry } from "./round-log.mjs";
 import { captureSnapshot, validateSnapshotOptions } from "./snapshot.mjs";
 
 const NOT_SELECTED = () =>
   egoError("Task space not selected", "EGO_TASK_SPACE_NOT_SELECTED");
 
+/** CDP commands that are agent actions worth a line in the round log. */
+const LOGGED_CDP = new Set([
+  "Page.navigate",
+  "Page.reload",
+  "Page.navigateToHistoryEntry",
+  "Page.captureScreenshot",
+  "Page.printToPDF",
+  "Input.insertText",
+  "DOM.setFileInputFiles",
+  "Target.createTarget",
+  "Target.closeTarget",
+]);
+
+/** Bindings that are not logged as actions. */
+const UNLOGGED = new Set(["useTaskSpace", "getHostCapabilities", "logEvent"]);
+
 /**
  * @param {object} options
  * @param {import("./control-channel.mjs").ControlClient} options.control
- * @param {{ wsUrl: string, spaces: object[] }} options.hello
+ * @param {{ spaces: object[], round?: string, display?: string, headless?: boolean }} options.hello
  */
 export async function createEgoBindings({ control, hello }) {
   const raw = await connectBrowser(control, hello);
@@ -42,6 +67,7 @@ export async function createEgoBindings({ control, hello }) {
   // Tabs activated through raw CDP in this invocation. Kept locally so a
   // snapshot right after Target.activateTarget never races the daemon.
   const activated = new Map();
+  const roundLog = createRoundLogger(control, hello.round);
 
   const call = (method, params) => control.call(method, params);
   const taskCall = async (method, params = {}) => {
@@ -73,6 +99,20 @@ export async function createEgoBindings({ control, hello }) {
       return { currentVersion: HOST_VERSION, updateAvailable: false };
     },
 
+    /** Host extensions this binding set supports. */
+    getHostCapabilities(...args) {
+      expectArgs("getHostCapabilities", args, 0);
+      return {
+        host: "linux",
+        taskSpaceTtl: true,
+        taskSpaceMemo: true,
+        restoreTaskSpaceTabs: true,
+        handOffRelay: true,
+        handOffViewer: hello.display === "virtual",
+        logEvent: true,
+      };
+    },
+
     useTaskSpace(...args) {
       expectArgs("useTaskSpace", args, 1);
       const [id] = args;
@@ -99,8 +139,8 @@ export async function createEgoBindings({ control, hello }) {
     },
 
     async createTaskSpace(...args) {
-      expectArgs("createTaskSpace", args, 1, 2);
-      const [name, profileId] = args;
+      expectArgs("createTaskSpace", args, 1, 3);
+      const [name, profileId, options] = args;
       if (typeof name !== "string" || name.length === 0) {
         throw invalidArgument(
           "createTaskSpace(name) requires a non-empty name",
@@ -109,7 +149,19 @@ export async function createEgoBindings({ control, hello }) {
       if (profileId !== undefined && typeof profileId !== "string") {
         throw invalidArgument("createTaskSpace profileId must be a string");
       }
-      return call("createTaskSpace", { name, profileId });
+      if (
+        options !== undefined &&
+        (options === null || typeof options !== "object")
+      ) {
+        throw invalidArgument("createTaskSpace options must be an object");
+      }
+      const ttlMs = options?.ttlMs;
+      if (ttlMs !== undefined && (!Number.isSafeInteger(ttlMs) || ttlMs <= 0)) {
+        throw invalidArgument(
+          "createTaskSpace ttlMs must be a positive whole number of milliseconds",
+        );
+      }
+      return call("createTaskSpace", { name, profileId, ttlMs });
     },
 
     async claimTaskSpace(...args) {
@@ -135,9 +187,34 @@ export async function createEgoBindings({ control, hello }) {
     },
 
     async handOffTaskSpace(...args) {
-      expectArgs("handOffTaskSpace", args, 0);
+      expectArgs("handOffTaskSpace", args, 0, 1);
+      const [options] = args;
+      if (
+        options !== undefined &&
+        (options === null || typeof options !== "object")
+      ) {
+        throw invalidArgument("handOffTaskSpace options must be an object");
+      }
+      if (options?.relay === true) {
+        // The agent keeps control and relays what the user says to do.
+        if (selected === undefined) return NOT_SELECTED();
+        const relay = await call("relay", { id: selected });
+        if (isEgoError(relay)) return relay;
+        process.stderr.write(relayNotice(selected, relay));
+        return { relay };
+      }
       const result = await taskCall("handOffTaskSpace");
-      if (hello.headless && !isEgoError(result)) {
+      if (isEgoError(result)) return result;
+      if (hello.display === "virtual") {
+        const viewer = await call("startViewer", { spaceId: selected }).catch(
+          (error) => egoError(error.message, "EGO_VIEWER_UNAVAILABLE"),
+        );
+        process.stderr.write(
+          isEgoError(viewer)
+            ? `[ego-browser] warning: task space ${selected} is handed off, but no viewer could start: ${viewer.error}\n`
+            : viewerNotice(selected, viewer),
+        );
+      } else if (hello.headless) {
         process.stderr.write(headlessHandOffWarning(selected));
       }
       return result;
@@ -154,6 +231,53 @@ export async function createEgoBindings({ control, hello }) {
         throw invalidArgument("setAgentTaskState(state) requires a string");
       }
       return taskCall("setAgentTaskState", { state: args[0] });
+    },
+
+    /**
+     * taskSpaceMemo(key) reads, taskSpaceMemo(key, value) writes, value null
+     * deletes. Resolves { found, value }. Kept with the space until finish().
+     */
+    async taskSpaceMemo(...args) {
+      expectArgs("taskSpaceMemo", args, 1, 2);
+      const [key, value] = args;
+      if (typeof key !== "string" || key.length === 0) {
+        throw invalidArgument("taskSpaceMemo(key) requires a non-empty string");
+      }
+      if (args.length === 1) {
+        return taskCall("memo", { key, hasValue: false });
+      }
+      let json;
+      try {
+        json = JSON.stringify(value);
+      } catch {
+        json = undefined;
+      }
+      if (json === undefined) {
+        throw invalidArgument(
+          "taskSpaceMemo value must be JSON (use null to delete)",
+        );
+      }
+      return taskCall("memo", { key, value: JSON.parse(json), hasValue: true });
+    },
+
+    /** Reopen the http(s) tabs a browser restart closed in this space. */
+    async restoreTaskSpaceTabs(...args) {
+      expectArgs("restoreTaskSpaceTabs", args, 0);
+      const result = await taskCall("restoreTabs");
+      if (!isEgoError(result) && result.tabs.length > 0) {
+        activated.set(selected, result.tabs.at(-1).targetId);
+      }
+      return result;
+    },
+
+    /** Add one action to the round log: { page, action, target, ms, ok, error_code }. */
+    logEvent(...args) {
+      expectArgs("logEvent", args, 1);
+      if (!args[0] || typeof args[0] !== "object") {
+        throw invalidArgument("logEvent(entry) requires an object");
+      }
+      roundLog.add({ ...sanitizeEntry(args[0]), space: selected });
+      return undefined;
     },
 
     async createTab(...args) {
@@ -236,6 +360,7 @@ export async function createEgoBindings({ control, hello }) {
         return undefined;
       }
       trackActivation(message, selected, spaces, activated, call);
+      roundLog.command(message, selected);
       raw.sendRaw(message);
       return undefined;
     },
@@ -244,35 +369,193 @@ export async function createEgoBindings({ control, hello }) {
     onSendCDPMessageError: null,
   };
 
+  // Log each binding call (name, time, result code) for `ego-browser logs`.
+  for (const [name, fn] of Object.entries(ego)) {
+    if (typeof fn !== "function" || UNLOGGED.has(name)) continue;
+    if (name === "sendCDPMessage") continue;
+    ego[name] = function logged(...args) {
+      const started = Date.now();
+      const space = selected;
+      const record = (ok, errorCode) =>
+        roundLog.add({
+          space,
+          action: name,
+          ms: Date.now() - started,
+          ok,
+          ...(errorCode ? { error_code: errorCode } : {}),
+        });
+      let result;
+      try {
+        result = fn.apply(this, args);
+      } catch (error) {
+        record(false, error?.error_code || "EXCEPTION");
+        throw error;
+      }
+      if (result && typeof result.then === "function") {
+        return result.then(
+          (value) => {
+            record(!isEgoError(value), value?.error_code);
+            return value;
+          },
+          (error) => {
+            record(false, error?.error_code || "EXCEPTION");
+            throw error;
+          },
+        );
+      }
+      return result;
+    };
+  }
+
   raw.onMessage((text) => {
+    roundLog.reply(text);
     const callback = ego.onCDPMessage;
     if (typeof callback === "function") callback(text);
   });
 
-  Object.defineProperty(ego, "close", {
-    enumerable: false,
-    value() {
-      raw.close();
-      internal?.close();
+  Object.defineProperties(ego, {
+    close: {
+      enumerable: false,
+      value() {
+        roundLog.stop();
+        raw.close();
+        internal?.close();
+      },
     },
+    /** Start and end lines for this round; `flushLog` sends what is queued. */
+    logRound: {
+      enumerable: false,
+      value: (event, fields = {}) =>
+        roundLog.add({ kind: "round", event, space: selected, ...fields }),
+    },
+    flushLog: { enumerable: false, value: () => roundLog.flush() },
   });
   return ego;
 }
 
 /**
- * Connect to the browser endpoint. When that fails, ask the daemon again:
- * hello checks the browser and returns the endpoint it is using now.
+ * Queue of round-log entries, sent to the daemon in batches. Only names,
+ * ids, timings and codes: never CDP params, typed text or page content.
+ */
+export function createRoundLogger(control, round, now = Date.now) {
+  let queue = [];
+  const pending = new Map();
+  let keys = 0;
+  let count = 0;
+  const timer = setInterval(() => flush(), 500);
+  timer.unref?.();
+
+  function add(entry) {
+    if (!round) return;
+    if (entry.kind !== "round") count += 1;
+    if (entry.kind === "round" && entry.event === "end") {
+      entry = {
+        ...entry,
+        count,
+        ...(keys ? { message: `${keys} key events` } : {}),
+      };
+    }
+    queue.push({ ts: now(), round, ...entry });
+    if (queue.length >= 200) flush();
+  }
+
+  function flush() {
+    if (queue.length === 0) return Promise.resolve();
+    const entries = queue;
+    queue = [];
+    return Promise.resolve(control.call("log", { entries })).catch(() => {});
+  }
+
+  return {
+    add,
+    flush,
+    stop: () => clearInterval(timer),
+    /** Note a raw CDP command the agent sent, if it is an action. */
+    command(text, space) {
+      if (!round) return;
+      if (
+        !/"Input\.dispatchKeyEvent"|"Page\.|"Input\.|"DOM\.setFileInputFiles"|"Target\.(create|close)Target"/.test(
+          text,
+        )
+      ) {
+        return;
+      }
+      let message;
+      try {
+        message = JSON.parse(text);
+      } catch {
+        return;
+      }
+      const { id, method, params = {} } = message;
+      if (method === "Input.dispatchKeyEvent") {
+        if (params.type === "keyDown" || params.type === "rawKeyDown")
+          keys += 1;
+        return;
+      }
+      const isClick =
+        method === "Input.dispatchMouseEvent" && params.type === "mousePressed";
+      if (!isClick && !LOGGED_CDP.has(method)) return;
+      const target =
+        method === "Page.navigate" || method === "Target.createTarget"
+          ? originOf(params.url)
+          : undefined;
+      pending.set(id, {
+        action: isClick ? "click" : method,
+        target,
+        space,
+        started: now(),
+      });
+    },
+    /** Match a reply to a logged command. */
+    reply(text) {
+      if (pending.size === 0) return;
+      const head = /^\{"id":(\d+),"(result|error)"/.exec(text);
+      if (!head) return;
+      const entry = pending.get(Number(head[1]));
+      if (!entry) return;
+      pending.delete(Number(head[1]));
+      let errorCode;
+      if (head[2] === "error") errorCode = "CDP_ERROR";
+      else if (
+        entry.action === "Page.navigate" &&
+        /"errorText":"[^"]/.test(text.slice(0, 2_000))
+      ) {
+        errorCode = "NAVIGATION_FAILED";
+      }
+      add({
+        space: entry.space,
+        action: entry.action,
+        ...(entry.target ? { target: entry.target } : {}),
+        ms: now() - entry.started,
+        ok: !errorCode,
+        ...(errorCode ? { error_code: errorCode } : {}),
+      });
+    },
+  };
+}
+
+/** Origin only: a path or query can carry a token. */
+function originOf(url) {
+  try {
+    const parsed = new URL(url);
+    return /^https?:$/.test(parsed.protocol) ? parsed.origin : parsed.protocol;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Connect to the browser through the daemon's CDP proxy. When that fails,
+ * say hello again (it checks the browser) and retry once.
  */
 export async function connectBrowser(control, hello) {
   try {
-    return await CdpConnection.connect(hello.wsUrl);
+    return await CdpConnection.connectProxy(control.path);
   } catch (first) {
     const fresh = await control.call("hello").catch(() => null);
-    if (fresh?.wsUrl) {
+    if (fresh) {
       try {
-        const connection = await CdpConnection.connect(fresh.wsUrl);
-        hello.wsUrl = fresh.wsUrl;
-        return connection;
+        return await CdpConnection.connectProxy(control.path);
       } catch {
         // Fall through to the error below.
       }
@@ -289,12 +572,21 @@ export async function connectBrowser(control, hello) {
 /** Tabs do not survive a browser restart; say so instead of losing them quietly. */
 export function lostTabsNotice(id, urls) {
   const list = urls.map((url) => `  ${url || "(unknown URL)"}\n`).join("");
-  return `[ego-browser] the browser restarted, so task space ${id} lost its tabs and Page labels. Open a Page with task.newPage() and go to the URL again. Tabs that were open:\n${list}`;
+  return `[ego-browser] the browser restarted, so task space ${id} lost its tabs and Page labels. Open a Page with task.newPage() and go to the URL again, or reopen them all with: ego-browser restore ${id}. Tabs that were open:\n${list}`;
 }
 
 /** A headless browser has no window, so nobody can act on a hand-off. */
 export function headlessHandOffWarning(id) {
-  return `[ego-browser] warning: the browser is headless, so the user cannot see or use task space ${id}. Resume it with takeOverTaskSpace(${id}), or close it with: ego-browser close --force ${id}\n`;
+  return `[ego-browser] warning: the browser is headless, so the user cannot see or use task space ${id}. Resume it with takeOverTaskSpace(${id}), or close it with: ego-browser close --force ${id}. To show the user the page instead: ego-browser relay ${id}. For a live view, restart with: ego-browser stop && ego-browser start --display virtual\n`;
+}
+
+/** Where the user can see a handed-off space. */
+export function viewerNotice(id, viewer) {
+  return `[ego-browser] task space ${id} is handed off. Give the user this link (it works once):\n  ${viewer.url}\nFrom their computer they first run: ${viewer.ssh}\nThe viewer stops when the agent takes over or after ${Math.round((viewer.expiresAt - Date.now()) / 60_000)} minutes. A new link: ego-browser view\n`;
+}
+
+export function relayNotice(id, relay) {
+  return `[ego-browser] task space ${id}: screenshot ${relay.screenshot} and snapshot ${relay.snapshot}. Show them to the user and do what they say. Never type a password the user did not give you.\n`;
 }
 
 function summariesById(list = []) {

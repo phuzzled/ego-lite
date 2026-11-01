@@ -4,8 +4,9 @@
  *
  *   ego-browser nodejs [--sdk-path <index.js>] [-e <code>]   run a script (stdin by default)
  *   ego-browser skill  [--sdk-path <index.js>]               print the usage guide
- *   ego-browser start | stop | status                        manage the browser daemon
+ *   ego-browser start [--display virtual] | stop | status    manage the browser daemon
  *   ego-browser spaces | close <id...> | close --all         list or close task spaces
+ *   ego-browser gc | logs | view | relay | restore | service operations
  *   ego-browser upgrade                                      how to update ego lite
  */
 import { spawn } from "node:child_process";
@@ -13,6 +14,7 @@ import { existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { loadConfig } from "../src/config.mjs";
 import { connectRunningDaemon } from "../src/control-channel.mjs";
 import { createEgoBindings } from "../src/ego-bindings.mjs";
 import {
@@ -21,6 +23,8 @@ import {
   daemonLogFile,
   debugSdkPath,
 } from "../src/paths.mjs";
+import { formatEntry, readLogs } from "../src/round-log.mjs";
+import { serviceCommand } from "../src/service.mjs";
 
 const USAGE = `ego-browser ${HOST_VERSION} (Linux)
 
@@ -30,12 +34,22 @@ Usage:
   EOF
   ego-browser nodejs [--sdk-path <index.js>] -e "<script>"
   ego-browser skill [--sdk-path <index.js>]
-  ego-browser start | stop | status
+  ego-browser start [--display virtual]
+                                     start the daemon; virtual: headful on Xvfb
+  ego-browser stop | status
   ego-browser spaces                 list task spaces
   ego-browser close <id> [<id>...]   close task spaces
   ego-browser close --all            close every agent-controlled task space
   ego-browser close --force <id|--all>
                                      also close spaces handed off to the user
+  ego-browser gc [--dry-run]         close agent spaces idle past their TTL
+  ego-browser logs [--space <id>] [-n <count>] [--follow] [--json]
+                                     recent rounds, actions and daemon events
+  ego-browser view [--stop]          a one-time noVNC link to the virtual display
+  ego-browser relay <id>             screenshot and snapshot of a space, to show the user
+  ego-browser restore <id>           reopen the tabs a browser restart closed
+  ego-browser service install [--display virtual] [--no-enable] | uninstall | status
+                                     systemd user service for the daemon
   ego-browser upgrade
 `;
 
@@ -55,9 +69,7 @@ async function main(argv) {
       return null;
     }
     case "start":
-      await connectDaemon();
-      process.stdout.write("ego lite daemon is running\n");
-      return 0;
+      return startDaemon(rest);
     case "stop":
       return stopDaemon();
     case "status":
@@ -66,6 +78,18 @@ async function main(argv) {
       return printSpaces();
     case "close":
       return closeSpaces(rest);
+    case "gc":
+      return runGc(rest);
+    case "logs":
+      return printLogs(rest);
+    case "view":
+      return startView(rest);
+    case "relay":
+      return relaySpace(rest);
+    case "restore":
+      return restoreSpace(rest);
+    case "service":
+      return serviceCommand(rest, { maxRssMb: loadConfig().config.maxRssMb });
     case "upgrade":
       process.stdout.write(
         `Re-run the ego lite Linux installer to upgrade:\n  ${INSTALL_COMMAND}\n`,
@@ -141,6 +165,8 @@ async function runNodejs({ sdkPath, code, rest }) {
   // here, because each agent command has a new parent shell.
   process.env.EGO_BROWSER_INSTANCE_ID = hello.instanceId;
   const spacesBefore = new Set(hello.spaces.map((space) => space.id));
+  const started = Date.now();
+  ego.logRound("start");
 
   let exitCode = 1;
   let module;
@@ -158,6 +184,8 @@ async function runNodejs({ sdkPath, code, rest }) {
     if (typeof module?.disposeEgoSdk === "function") {
       await module.disposeEgoSdk(globalThis).catch(() => {});
     }
+    ego.logRound("end", { exit: exitCode, ms: Date.now() - started });
+    await ego.flushLog();
     ego.close();
     control.close();
   }
@@ -202,14 +230,19 @@ async function reportOpenSpaces(control, spacesBefore) {
   }
 }
 
-async function printSpaces() {
-  let control;
+/** Connect to a running daemon, or print that none is running. */
+async function runningDaemon() {
   try {
-    control = await connectRunningDaemon();
+    return await connectRunningDaemon();
   } catch {
     process.stdout.write("ego lite daemon is not running\n");
-    return 1;
+    return null;
   }
+}
+
+async function printSpaces() {
+  const control = await runningDaemon();
+  if (!control) return 1;
   const { taskSpaces } = await control.call("listTaskSpaces");
   // describe, not listTabs: listTabs refuses spaces the agent may not use.
   const details = await Promise.all(
@@ -222,11 +255,16 @@ async function printSpaces() {
     process.stdout.write("no task spaces\n");
     return 0;
   }
-  process.stdout.write("id\towner\ttabs\tname\n");
+  process.stdout.write("id\towner\ttabs\tidle\tname\n");
   taskSpaces.forEach((space, index) => {
-    const count = details[index]?.targets?.length ?? "?";
+    const detail = details[index];
+    const count = detail?.targets?.length ?? "?";
+    const idle = detail?.lastActivity
+      ? formatDuration(Date.now() - detail.lastActivity)
+      : "?";
+    const stale = detail?.stale ? " (stale: tabs lost in a restart)" : "";
     process.stdout.write(
-      `${space.id}\t${space.ownership}\t${count}\t${space.name}\n`,
+      `${space.id}\t${space.ownership}\t${count}\t${idle}\t${space.name}${stale}\n`,
     );
   });
   return 0;
@@ -243,13 +281,8 @@ async function closeSpaces(args) {
     process.stderr.write(`close needs task space ids or --all\n${USAGE}`);
     return 2;
   }
-  let control;
-  try {
-    control = await connectRunningDaemon();
-  } catch {
-    process.stdout.write("ego lite daemon is not running\n");
-    return 1;
-  }
+  const control = await runningDaemon();
+  if (!control) return 1;
   if (all) {
     const { taskSpaces } = await control.call("listTaskSpaces");
     // Spaces the user owns stay open; handed-off ones close with --force.
@@ -281,20 +314,217 @@ async function closeSpaces(args) {
   return code;
 }
 
+async function runGc(args) {
+  const unknown = args.filter((arg) => arg !== "--dry-run");
+  if (unknown.length > 0) {
+    process.stderr.write(`Unknown option: ${unknown[0]}\n`);
+    return 2;
+  }
+  const control = await runningDaemon();
+  if (!control) return 1;
+  const { dryRun, actions } = await control.call("gc", {
+    dryRun: args.includes("--dry-run"),
+  });
+  control.close();
+  if (actions.length === 0) {
+    process.stdout.write("nothing to collect\n");
+    return 0;
+  }
+  for (const action of actions) {
+    const verb =
+      action.action === "closed"
+        ? dryRun
+          ? "would close"
+          : "closed"
+        : dryRun
+          ? "would return to the agent"
+          : "returned to the agent";
+    process.stdout.write(
+      `${action.id}\t${verb}\tidle ${formatDuration(action.idleMs)}\t${action.name}\n`,
+    );
+  }
+  return 0;
+}
+
+async function printLogs(args) {
+  let space;
+  let limit = 50;
+  let follow = false;
+  let json = false;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--space") space = Number(args[++i]);
+    else if (arg === "-n" || arg === "--lines") limit = Number(args[++i]);
+    else if (arg === "--follow" || arg === "-f") follow = true;
+    else if (arg === "--json") json = true;
+    else {
+      process.stderr.write(`Unknown option: ${arg}\n`);
+      return 2;
+    }
+  }
+  if (space !== undefined && !Number.isInteger(space)) {
+    process.stderr.write("--space needs a task space id\n");
+    return 2;
+  }
+  if (!Number.isInteger(limit) || limit < 0) {
+    process.stderr.write("-n needs a count\n");
+    return 2;
+  }
+  const print = (entry) =>
+    process.stdout.write(
+      `${json ? JSON.stringify(entry) : formatEntry(entry)}\n`,
+    );
+  let entries = readLogs({ space, limit });
+  entries.forEach(print);
+  if (!follow) return 0;
+  let last = entries.at(-1)?.ts ?? 0;
+  let seen = new Set(
+    entries.filter((e) => e.ts === last).map((e) => JSON.stringify(e)),
+  );
+  for (;;) {
+    await new Promise((done) => setTimeout(done, 500));
+    entries = readLogs({ space, limit: 500 }).filter(
+      (entry) =>
+        entry.ts > last ||
+        (entry.ts === last && !seen.has(JSON.stringify(entry))),
+    );
+    for (const entry of entries) print(entry);
+    if (entries.length > 0) {
+      last = entries.at(-1).ts;
+      seen = new Set(
+        entries.filter((e) => e.ts === last).map((e) => JSON.stringify(e)),
+      );
+    }
+  }
+}
+
+async function startView(args) {
+  const stop = args.includes("--stop");
+  const unknown = args.filter((arg) => arg !== "--stop");
+  if (unknown.length > 0) {
+    process.stderr.write(`Unknown option: ${unknown[0]}\n`);
+    return 2;
+  }
+  const control = await runningDaemon();
+  if (!control) return 1;
+  if (stop) {
+    process.stdout.write(`${await control.call("stopViewer")}\n`);
+    control.close();
+    return 0;
+  }
+  const viewer = await control.call("startViewer", {});
+  control.close();
+  if (viewer?.error_code) {
+    process.stderr.write(`${viewer.error_code}: ${viewer.error}\n`);
+    return 1;
+  }
+  const minutes = Math.round((viewer.expiresAt - Date.now()) / 60_000);
+  process.stdout.write(
+    `Viewer: ${viewer.url}\nFrom your computer: ${viewer.ssh}\nthen open the link. It works once; run ego-browser view again for a new one.\nThe viewer stops after ${minutes} minutes, when the hand-off ends, or with: ego-browser view --stop\n`,
+  );
+  return 0;
+}
+
+function spaceIdArg(args, command) {
+  const id = Number(args[0]);
+  if (args.length !== 1 || !Number.isInteger(id)) {
+    process.stderr.write(`${command} needs one task space id\n`);
+    return null;
+  }
+  return id;
+}
+
+async function relaySpace(args) {
+  const id = spaceIdArg(args, "relay");
+  if (id === null) return 2;
+  const control = await runningDaemon();
+  if (!control) return 1;
+  const result = await control.call("relay", { id });
+  control.close();
+  if (result?.error_code) {
+    process.stderr.write(`${result.error_code}: ${result.error}\n`);
+    return 1;
+  }
+  process.stdout.write(
+    `screenshot: ${result.screenshot}\nsnapshot: ${result.snapshot}\npage: ${result.title} ${result.url}\n`,
+  );
+  return 0;
+}
+
+async function restoreSpace(args) {
+  const id = spaceIdArg(args, "restore");
+  if (id === null) return 2;
+  const control = await runningDaemon();
+  if (!control) return 1;
+  const result = await control.call("restoreTabs", { id });
+  control.close();
+  if (result?.error_code) {
+    process.stderr.write(`${result.error_code}: ${result.error}\n`);
+    return 1;
+  }
+  for (const tab of result.tabs) process.stdout.write(`reopened ${tab.url}\n`);
+  for (const url of result.skipped) {
+    process.stdout.write(
+      `not reopened (not http/https): ${url || "(unknown)"}\n`,
+    );
+  }
+  if (result.tabs.length === 0 && result.skipped.length === 0) {
+    process.stdout.write(`task space ${id} has no lost tabs\n`);
+  }
+  return 0;
+}
+
+function formatDuration(ms) {
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h${minutes % 60 ? `${minutes % 60}m` : ""}`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+async function startDaemon(args) {
+  let display;
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === "--display") display = args[++i];
+    else if (args[i].startsWith("--display=")) display = args[i].slice(10);
+    else {
+      process.stderr.write(`Unknown option: ${args[i]}\n`);
+      return 2;
+    }
+  }
+  if (display !== undefined && display !== "virtual" && display !== "auto") {
+    process.stderr.write("--display must be virtual or auto\n");
+    return 2;
+  }
+  const env = { ...process.env };
+  if (display !== undefined) env.EGO_LITE_DISPLAY = display;
+  const control = await connectDaemon(env);
+  const hello = await control.call("hello");
+  control.close();
+  if (display === "virtual" && hello.display !== "virtual") {
+    process.stderr.write(
+      `ego lite is already running (${hello.display}). Run ego-browser stop, then ego-browser start --display virtual\n`,
+    );
+    return 1;
+  }
+  process.stdout.write(`ego lite daemon is running (${hello.display})\n`);
+  return 0;
+}
+
 /** Connect to the daemon, starting it in the background when needed. */
-async function connectDaemon(timeoutMs = 40_000) {
+async function connectDaemon(env = process.env, timeoutMs = 40_000) {
   try {
-    return await connectRunningDaemon();
+    return await connectRunningDaemon(env);
   } catch {
     // Not running yet.
   }
-  const logFile = daemonLogFile();
+  const logFile = daemonLogFile(env);
   mkdirSync(dirname(logFile), { recursive: true, mode: 0o700 });
-  const log = openSync(logFile, "a");
+  const log = openSync(logFile, "a", 0o600);
   const child = spawn(
     process.execPath,
     [fileURLToPath(import.meta.url), "daemon"],
-    { detached: true, stdio: ["ignore", log, log], env: process.env },
+    { detached: true, stdio: ["ignore", log, log], env },
   );
   child.unref();
 
@@ -302,7 +532,7 @@ async function connectDaemon(timeoutMs = 40_000) {
   while (Date.now() < deadline) {
     await new Promise((done) => setTimeout(done, 200));
     try {
-      return await connectRunningDaemon();
+      return await connectRunningDaemon(env);
     } catch {
       // Exit code 0: another daemon won the start race; keep waiting for it.
       if (child.exitCode) break;
@@ -329,18 +559,24 @@ async function stopDaemon() {
 }
 
 async function printStatus() {
-  let control;
-  try {
-    control = await connectRunningDaemon();
-  } catch {
-    process.stdout.write("ego lite daemon is not running\n");
-    return 1;
-  }
-  const hello = await control.call("hello");
+  const control = await runningDaemon();
+  if (!control) return 1;
+  const status = await control.call("status");
   const { taskSpaces } = await control.call("listTaskSpaces");
   control.close();
+  const { usage, limits } = status;
+  const of = (value, limit) => (limit > 0 ? `${value}/${limit}` : `${value}`);
   process.stdout.write(
-    `ego lite ${hello.version}\nbrowser: ${hello.browser}\ntask spaces: ${taskSpaces.length}\n`,
+    [
+      `ego lite ${status.version}`,
+      `browser: ${status.browser} (${status.display}, DevTools ${status.devtools})`,
+      `agent task spaces: ${of(usage.agentTaskSpaces, limits.maxTaskSpaces)}`,
+      `pages: ${of(usage.pages, limits.maxTotalPages)} (at most ${limits.maxPagesPerSpace || "any"} per space)`,
+      `memory: ${usage.memoryMb ?? "?"} MB${limits.maxRssMb > 0 ? ` of ${limits.maxRssMb} MB` : ""}`,
+      `viewer: ${status.viewer ? `127.0.0.1:${status.viewer.port}, ${status.viewer.connections} connected` : "off"}`,
+      `task spaces: ${taskSpaces.length}`,
+      "",
+    ].join("\n"),
   );
   for (const space of taskSpaces) {
     process.stdout.write(
