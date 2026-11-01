@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
-import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
 import { bypassProxyForLoopback } from "./cdp-connection.mjs";
+import { webSocketServer } from "./test-support.mjs";
 
 describe("bypassProxyForLoopback", () => {
   it("sets NO_PROXY when no variable exists", () => {
@@ -28,25 +27,6 @@ describe("bypassProxyForLoopback", () => {
     assert.equal(env.NO_PROXY, "intranet,127.0.0.1,localhost,::1");
   });
 });
-
-/** Smallest WebSocket server: accept the upgrade, then hold the socket. */
-function webSocketServer() {
-  const server = createServer();
-  server.on("upgrade", (request, socket) => {
-    socket.unref();
-    const accept = createHash("sha1")
-      .update(
-        `${request.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`,
-      )
-      .digest("base64");
-    socket.write(
-      `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
-    );
-  });
-  return new Promise((resolve) =>
-    server.listen(0, "127.0.0.1", () => resolve(server)),
-  );
-}
 
 describe("CdpConnection.connect", () => {
   it("reaches a loopback endpoint when Node sends traffic to a proxy", async () => {

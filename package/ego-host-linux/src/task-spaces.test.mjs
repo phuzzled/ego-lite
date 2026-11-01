@@ -198,6 +198,16 @@ describe("TaskSpaceRegistry", () => {
     assert.equal(registry.gate(1).error_code, "EGO_TASK_SPACE_NOT_FOUND");
   });
 
+  it("closeTaskSpace closes a handed-off space only with force", async () => {
+    await registry.createTaskSpace("work");
+    await registry.handOffTaskSpace(1);
+    const refused = await registry.closeTaskSpace(1);
+    assert.equal(refused.error_code, "EGO_TASK_SPACE_USER_IN_CONTROL");
+    const result = await registry.closeTaskSpace(1, { force: true });
+    assert.equal(result, "1 task space closed.");
+    assert.equal(registry.describe(1), null);
+  });
+
   it("round-trips saved state and keeps ids increasing", async () => {
     await registry.createTaskSpace("one");
     await registry.createTaskSpace("two");

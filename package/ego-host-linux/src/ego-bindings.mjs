@@ -130,7 +130,11 @@ export async function createEgoBindings({ control, hello }) {
 
     async handOffTaskSpace(...args) {
       expectArgs("handOffTaskSpace", args, 0);
-      return taskCall("handOffTaskSpace");
+      const result = await taskCall("handOffTaskSpace");
+      if (hello.headless && !isEgoError(result)) {
+        process.stderr.write(headlessHandOffWarning(selected));
+      }
+      return result;
     },
 
     async takeOverTaskSpace(...args) {
@@ -274,6 +278,11 @@ export async function connectBrowser(control, hello) {
       { error_code: "EGO_BROWSER_UNAVAILABLE" },
     );
   }
+}
+
+/** A headless browser has no window, so nobody can act on a hand-off. */
+export function headlessHandOffWarning(id) {
+  return `[ego-browser] warning: the browser is headless, so the user cannot see or use task space ${id}. Resume it with takeOverTaskSpace(${id}), or close it with: ego-browser close --force ${id}\n`;
 }
 
 function summariesById(list = []) {

@@ -16,7 +16,7 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 
-import { launchBrowser } from "./browser-launcher.mjs";
+import { launchBrowser, wantsHeadless } from "./browser-launcher.mjs";
 import { CdpConnection } from "./cdp-connection.mjs";
 import {
   connectRunningDaemon,
@@ -137,6 +137,7 @@ export async function runDaemon(env = process.env) {
         version: HOST_VERSION,
         wsUrl,
         instanceId,
+        headless: wantsHeadless(env),
         browser: browserVersion.product,
         spaces: spaceSummaries(registry),
       };
@@ -147,7 +148,8 @@ export async function runDaemon(env = process.env) {
     createTaskSpace: ({ name, profileId }) =>
       registry.createTaskSpace(name, profileId),
     claimTaskSpace: ({ id, name }) => registry.claimTaskSpace(id, name),
-    closeTaskSpace: ({ id }) => registry.closeTaskSpace(id),
+    closeTaskSpace: ({ id, force }) =>
+      registry.closeTaskSpace(id, { force: force === true }),
     completeTaskSpace: ({ id }) => registry.completeTaskSpace(id),
     handOffTaskSpace: ({ id, reason }) => registry.handOffTaskSpace(id, reason),
     takeOverTaskSpace: ({ id }) => registry.takeOverTaskSpace(id),

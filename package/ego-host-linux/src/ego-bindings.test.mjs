@@ -1,6 +1,49 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
-import { rawCdpGate } from "./ego-bindings.mjs";
+import { describe, it, mock } from "node:test";
+import { createEgoBindings, rawCdpGate } from "./ego-bindings.mjs";
+import { webSocketServer } from "./test-support.mjs";
+
+describe("handOffTaskSpace", () => {
+  async function handOff(headless) {
+    const server = await webSocketServer();
+    const control = {
+      call: async (method) =>
+        method === "handOffTaskSpace"
+          ? "3 has been handed off to the user."
+          : null,
+      onEvent: () => {},
+    };
+    const hello = {
+      wsUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser/x`,
+      spaces: [],
+      headless,
+    };
+    const ego = await createEgoBindings({ control, hello });
+    const write = mock.method(process.stderr, "write", () => true);
+    try {
+      ego.useTaskSpace(3);
+      const result = await ego.handOffTaskSpace();
+      return { result, stderr: write.mock.calls.map((c) => c.arguments[0]) };
+    } finally {
+      write.mock.restore();
+      ego.close();
+      server.close();
+    }
+  }
+
+  it("warns that nobody can see a headless browser", async () => {
+    const { result, stderr } = await handOff(true);
+    assert.equal(result, "3 has been handed off to the user.");
+    assert.equal(stderr.length, 1);
+    assert.match(stderr[0], /headless/);
+    assert.match(stderr[0], /ego-browser close --force 3/);
+  });
+
+  it("stays quiet when the browser has a window", async () => {
+    const { stderr } = await handOff(false);
+    assert.deepEqual(stderr, []);
+  });
+});
 
 describe("rawCdpGate", () => {
   it("requires a selected task space", () => {

@@ -34,8 +34,13 @@ Usage:
   ego-browser spaces                 list task spaces
   ego-browser close <id> [<id>...]   close task spaces
   ego-browser close --all            close every agent-controlled task space
+  ego-browser close --force <id|--all>
+                                     also close spaces handed off to the user
   ego-browser upgrade
 `;
+
+const INSTALL_COMMAND =
+  "curl -fsSL https://raw.githubusercontent.com/phuzzled/ego-lite/main/package/ego-host-linux/scripts/install.sh | sh";
 
 async function main(argv) {
   const [command, ...rest] = argv;
@@ -63,7 +68,7 @@ async function main(argv) {
       return closeSpaces(rest);
     case "upgrade":
       process.stdout.write(
-        "Re-run the ego lite Linux installer to upgrade:\n  sh skills/ego-browser/scripts/install.sh\n",
+        `Re-run the ego lite Linux installer to upgrade:\n  ${INSTALL_COMMAND}\n`,
       );
       return 0;
     case "-h":
@@ -206,9 +211,10 @@ async function printSpaces() {
     return 1;
   }
   const { taskSpaces } = await control.call("listTaskSpaces");
-  const tabs = await Promise.all(
+  // describe, not listTabs: listTabs refuses spaces the agent may not use.
+  const details = await Promise.all(
     taskSpaces.map((space) =>
-      control.call("listTabs", { id: space.id }).catch(() => null),
+      control.call("describe", { id: space.id }).catch(() => null),
     ),
   );
   control.close();
@@ -218,7 +224,7 @@ async function printSpaces() {
   }
   process.stdout.write("id\towner\ttabs\tname\n");
   taskSpaces.forEach((space, index) => {
-    const count = tabs[index]?.tabs?.length ?? "?";
+    const count = details[index]?.targets?.length ?? "?";
     process.stdout.write(
       `${space.id}\t${space.ownership}\t${count}\t${space.name}\n`,
     );
@@ -228,7 +234,11 @@ async function printSpaces() {
 
 async function closeSpaces(args) {
   const all = args.includes("--all");
-  const ids = args.filter((arg) => arg !== "--all").map(Number);
+  // The CLI is the user acting, so --force may close a handed-off space.
+  const force = args.includes("--force");
+  const ids = args
+    .filter((arg) => arg !== "--all" && arg !== "--force")
+    .map(Number);
   if ((!all && ids.length === 0) || ids.some((id) => !Number.isInteger(id))) {
     process.stderr.write(`close needs task space ids or --all\n${USAGE}`);
     return 2;
@@ -242,21 +252,26 @@ async function closeSpaces(args) {
   }
   if (all) {
     const { taskSpaces } = await control.call("listTaskSpaces");
-    // Spaces the user owns or controls stay open.
+    // Spaces the user owns stay open; handed-off ones close with --force.
+    const closable = force ? ["agent", "agentDelegatedToUser"] : ["agent"];
     ids.push(
       ...taskSpaces
-        .filter((space) => space.ownership === "agent")
+        .filter((space) => closable.includes(space.ownership))
         .map((space) => space.id),
     );
   }
   let code = 0;
   for (const id of ids) {
-    const result = await control.call("closeTaskSpace", { id });
+    const result = await control.call("closeTaskSpace", { id, force });
     if (typeof result === "string") {
       process.stdout.write(`${result}\n`);
     } else {
+      const hint =
+        result?.error_code === "EGO_TASK_SPACE_USER_IN_CONTROL"
+          ? `; to close it anyway: ego-browser close --force ${id}`
+          : "";
       process.stderr.write(
-        `${id}: not closed (${result?.error_code || "error"}: ${result?.error})\n`,
+        `${id}: not closed (${result?.error_code || "error"}: ${result?.error})${hint}\n`,
       );
       code = 1;
     }

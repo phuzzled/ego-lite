@@ -122,10 +122,11 @@ export class TaskSpaceRegistry {
     return descriptor(space);
   }
 
-  async closeTaskSpace(id) {
+  /** `force` is the user acting through the CLI: it closes a handed-off space. */
+  async closeTaskSpace(id, { force = false } = {}) {
     const space = this.#spaces.get(id);
     if (!space) return notFound(id);
-    if (space.control === "user") return userInControl(space);
+    if (space.control === "user" && !force) return userInControl(space);
     this.#spaces.delete(id);
     this.#changed();
     await Promise.allSettled(
