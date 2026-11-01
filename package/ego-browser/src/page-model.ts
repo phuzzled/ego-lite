@@ -105,7 +105,12 @@ import {
   type PageWaitForURLOptions,
 } from "./driver/page-waits.js";
 import { ElementResolutionError } from "./element-resolver.js";
-import { attachHint, invokeEgo, probeAgentControl } from "./ego-errors.js";
+import {
+  attachHint,
+  invokeEgo,
+  probeAgentControl,
+  withHint,
+} from "./ego-errors.js";
 import {
   withPage as defaultWithPage,
   withSpace as defaultWithSpace,
@@ -1676,6 +1681,15 @@ class TaskSpace {
       throw unsupportedOnHost(
         "task.restorePages",
         "open the Pages again with await task.newPage() and page.goto(url)",
+      );
+    }
+    if (this.profileId === "ephemeral") {
+      // An ephemeral space lives in a browser context that a restart
+      // deletes, with the space: there is never anything to restore.
+      throw withHint(
+        "EGO_INVALID_ARGUMENT",
+        "task.restorePages: an ephemeral task space does not outlive the browser, so it has no Pages to restore",
+        'Use a persistent profile (taskSpace(name) or profileId: "Default") for work that must survive a browser restart; otherwise open the Pages again with task.newPage().',
       );
     }
     return this.#services.gate.withSpace(this.id, async () => {

@@ -124,7 +124,8 @@ After a browser restart a space keeps its id but loses its tabs. Resume with
 their labels; form state is lost. `task.memo(key, value?)` keeps small JSON
 progress notes with the space so a rerun can skip finished steps (`null`
 deletes; `finish()` clears them). Both throw `EGO_UNSUPPORTED_ON_HOST` on hosts
-without them.
+without them. An `"ephemeral"` space does not survive a browser restart (a
+rerun gets a new, empty space), so its `restorePages()` throws.
 
 ```js
 const task = await taskSpace("price check", { restorePages: true });

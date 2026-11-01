@@ -7899,3 +7899,39 @@ test("finishing an ephemeral space reports it closed, even with keep: all", asyn
     assert.deepEqual(lifecycle, ["finish"]);
   });
 });
+
+test("restorePages on an ephemeral task space fails clearly", async () => {
+  await withFixture(async (fixture) => {
+    let restored = false;
+    const host = hostServices({
+      taskSpaceMemo: true,
+      restoreTaskSpaceTabs: true,
+    });
+    const task = createTaskSpaceHandle(
+      {
+        id: 7,
+        name: "throwaway",
+        ownership: "agent",
+        profileId: "ephemeral",
+      },
+      {
+        ledger: new PageLedgerStore({ rootDir: fixture.rootDir }),
+        ...fixture.services,
+        ...host.overrides,
+        async restoreTaskSpaceTabs() {
+          restored = true;
+          return { tabs: [], skipped: [] };
+        },
+      },
+    );
+    await assert.rejects(
+      () => task.restorePages(),
+      (error) => {
+        assert.match(error.message, /ephemeral task space does not outlive/);
+        assert.match(error.hint, /persistent profile/);
+        return true;
+      },
+    );
+    assert.equal(restored, false, "the host is not asked");
+  });
+});
