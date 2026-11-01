@@ -525,7 +525,8 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
     signature:
       "await page.click(selector, { button?, clickCount?, delay?, position?, force?, timeout?, label? })",
     returns: "Promise<ActionReceipt> // { popups?, dialog? }",
-    summary: "Click an element with native CDP input.",
+    summary:
+      "Click an element with native CDP input. Retries while the element is not ready; never repeats input that reached the page. A timeout error has mayHaveLateEffects: true when input was already sent.",
     options: {
       button,
       clickCount: option("positiveInteger", "Number of clicks."),
@@ -541,7 +542,8 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
     signature:
       "await page.dblclick(selector, { button?, delay?, position?, force?, timeout?, label? })",
     returns: "Promise<ActionReceipt> // { popups?, dialog? }",
-    summary: "Double-click an element with native CDP input.",
+    summary:
+      "Double-click an element with native CDP input. Retries while the element is not ready; never repeats input that reached the page. A timeout error has mayHaveLateEffects: true when input was already sent.",
     options: { button, delay, position, force, timeout: actionTimeout, label },
   },
   {
@@ -557,7 +559,8 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
     signature:
       "await page.dragAndDrop(source, target, { button?, sourcePosition?, targetPosition?, force?, timeout?, label? })",
     returns: "Promise<ActionReceipt> // { popups?, dialog? }",
-    summary: "Drag from one element to another.",
+    summary:
+      "Drag from one element to another. Retries while the element is not ready; never repeats input that reached the page. A timeout error has mayHaveLateEffects: true when input was already sent.",
     options: {
       button,
       sourcePosition: position,
@@ -572,7 +575,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
     signature: "await page.fill(selector, value, { clearFirst?, timeout? })",
     returns: "Promise<ActionReceipt> // { popups?, dialog? }",
     summary:
-      "Fill the selected field, its editing host, or its unique fillable descendant, then confirm editing took effect.",
+      "Fill the selected field, its editing host, or its unique fillable descendant, then confirm editing took effect. Retries while the element is not ready; never repeats input that reached the page. A timeout error has mayHaveLateEffects: true when input was already sent.",
     options: {
       clearFirst: option("boolean", "Clear the current value before filling."),
       timeout: actionTimeout,
@@ -599,7 +602,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
     signature: "await page.press(selector, chord, { delay?, timeout? })",
     returns: "Promise<ActionReceipt> // { popups?, dialog? }",
     summary:
-      "Focus one element and press a key or shortcut chord. Named keys are case-insensitive; single-character keys preserve case.",
+      "Focus one element and press a key or shortcut chord. Named keys are case-insensitive; single-character keys preserve case. Retries while the element is not ready; never repeats input that reached the page. A timeout error has mayHaveLateEffects: true when input was already sent.",
     options: { delay, timeout: actionTimeout },
   },
   {

@@ -2672,10 +2672,14 @@ class Page {
   ): Promise<Result> {
     const deadline = this.#services.now() + timeoutMs;
     let lastBlocker: Error | undefined;
+    // Whether any attempt reached the page with input. Such an attempt is never
+    // repeated, but its effects (a submit, a navigation) may still land.
+    let anyInputDispatched = false;
     while (true) {
       let inputDispatched = false;
       const services = this.#inputTrackingServices(() => {
         inputDispatched = true;
+        anyInputDispatched = true;
       });
       try {
         const prepared = await prepare(deadline - this.#services.now());
@@ -2695,10 +2699,12 @@ class Page {
         if (!retryable && !exhausted) throw error;
         if (remainingMs <= 0) {
           const blocker = exhausted && lastBlocker ? lastBlocker : error;
-          throw new ElementResolutionError(
+          const timeoutError = new ElementResolutionError(
             `${actionName} timed out after ${timeoutMs}ms: ${blocker.message}`,
             "transient",
           );
+          timeoutError.mayHaveLateEffects = anyInputDispatched;
+          throw timeoutError;
         }
         lastBlocker = error;
         await this.#services.sleep(

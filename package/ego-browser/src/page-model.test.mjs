@@ -5965,6 +5965,66 @@ test("Page click times out while a pointer interceptor remains", async () => {
   });
 });
 
+test("an action timeout before any input reports no late effects and a hint", async () => {
+  await withFixture(async (fixture) => {
+    const task = taskForRound(fixture, "round-a");
+    const page = await openTestPage(task, "https://example.test/first");
+    fixture.interceptClickPoints(100);
+
+    await assert.rejects(
+      () => page.click("#covered", { timeout: 100 }),
+      (error) => {
+        assert.match(error.message, /page\.click timed out after 100ms/);
+        assert.equal(error.mayHaveLateEffects, false);
+        assert.equal(typeof error.hint, "string");
+        assert.match(error.stack, /\n {2}hint: /);
+        return true;
+      },
+    );
+  });
+});
+
+test("an action timeout after input reached the page reports late effects", async () => {
+  await withFixture(async (fixture) => {
+    const { ElementResolutionError } =
+      await import("../dist/src/element-resolver.js");
+    let releases = 0;
+    const task = taskForRound(fixture, "round-a", {
+      async cdp(method, params, sessionId, timeoutMs) {
+        const result = await fixture.services.cdp(
+          method,
+          params,
+          sessionId,
+          timeoutMs,
+        );
+        // The gesture reached the page, then the element kept changing.
+        if (
+          method === "Input.dispatchMouseEvent" &&
+          params.type === "mouseReleased"
+        ) {
+          releases += 1;
+          throw new ElementResolutionError(
+            "element is not visible after the click",
+            "transient",
+          );
+        }
+        return result;
+      },
+    });
+    const page = await openTestPage(task, "https://example.test/first");
+
+    await assert.rejects(
+      () => page.click("#submit", { timeout: 100 }),
+      (error) => {
+        assert.match(error.message, /page\.click timed out after 100ms/);
+        assert.equal(error.mayHaveLateEffects, true);
+        return true;
+      },
+    );
+    assert(releases >= 1, "the click reached the page");
+  });
+});
+
 test("Page click force bypasses only the pointer interception check", async () => {
   await withFixture(async (fixture) => {
     const task = taskForRound(fixture, "round-a");
