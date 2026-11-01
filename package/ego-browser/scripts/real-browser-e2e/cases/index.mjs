@@ -59,6 +59,16 @@ import {
 import { pageSnapshotStatsCase } from "./page-snapshot-stats.mjs";
 import { pageSettleCase } from "./page-settle.mjs";
 import { pageNetworkResponsesCase } from "./page-network-responses.mjs";
+import {
+  hostFeaturesCase,
+  hostRoundLogCase,
+  pageConsentCase,
+  pageReadCase,
+  pageScrollPaginateCase,
+  pageTablesCase,
+  restorePrepareCase,
+  restoreResumeCase,
+} from "./page-extraction.mjs";
 import { runtimeCase } from "./runtime.mjs";
 import { runtimeRegressionCase } from "./runtime-regression.mjs";
 import { eventIsolationCase } from "./event-isolation.mjs";
@@ -211,4 +221,25 @@ export const e2eCases = [
   { name: "pure CDP workflow", body: pureCdpWorkflowCase },
   { name: "snapshot workflow", body: snapshotWorkflowCase },
   { name: "visual workflow", body: visualWorkflowCase },
+  { name: "Page read and PDF text", body: pageReadCase, timeoutMs: 60_000 },
+  {
+    name: "Page tables, structured data and tiles",
+    body: pageTablesCase,
+  },
+  { name: "Page consent banners", body: pageConsentCase },
+  {
+    name: "Page scroll, pagination and task.map",
+    body: pageScrollPaginateCase,
+    timeoutMs: 90_000,
+  },
+  { name: "host memo, relay and TTL", body: hostFeaturesCase },
+  { name: "host round log", body: hostRoundLogCase },
+  // Keep these two last: the host restarts its browser between them.
+  { name: "restore Pages: prepare", body: restorePrepareCase },
+  {
+    name: "restore Pages after a browser restart",
+    body: restoreResumeCase,
+    hostCommand: ["stop"],
+    timeoutMs: 60_000,
+  },
 ];

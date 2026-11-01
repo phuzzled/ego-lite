@@ -209,6 +209,19 @@ export async function runRealBrowserE2e() {
       recordResult(testCase.name, "skip", 0, 0);
       return;
     }
+    if (testCase.hostCommand && process.platform === "linux") {
+      // A host command between rounds, such as `stop` to restart the
+      // browser. Only the Linux host has these commands; failures are
+      // reported by the case that follows.
+      await runCommand(egoBrowserCli, testCase.hostCommand, {
+        cwd: packageDir,
+        timeoutMs: 30_000,
+      }).catch((error) => {
+        console.error(
+          `[host ${testCase.hostCommand.join(" ")}] ${error?.message || error}`,
+        );
+      });
+    }
     if (testCase.expectedTermination) {
       await runExpectedTerminationCase(
         testCase.name,

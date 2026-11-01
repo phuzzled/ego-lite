@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 
 import { handleAgentFixture } from "./agent-fixture.mjs";
+import { handleExtractionFixture } from "./extraction-fixture.mjs";
 
 export async function closeFixtureServer(fixtureServer) {
   await new Promise((resolve) => {
@@ -28,6 +29,12 @@ export async function startFixtureServer(taskName) {
     if (
       url.pathname.startsWith("/agent/") &&
       handleAgentFixture(url, req, res)
+    ) {
+      return;
+    }
+    if (
+      url.pathname.startsWith("/extract/") &&
+      handleExtractionFixture(url, res)
     ) {
       return;
     }
