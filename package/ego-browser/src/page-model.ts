@@ -1,5 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute } from "node:path";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
 
 import {
   browserCdp,
@@ -25,6 +26,7 @@ import {
   type FileChooserOpenedEvent,
 } from "./browser-runtime.js";
 import { runtimeValue } from "./cdp-eval.js";
+import { stitchPngsVertically } from "./png-stitch.js";
 import { withTemporaryClipboardText } from "./clipboard.js";
 import {
   captureScreenshotForSession,
@@ -638,6 +640,11 @@ const SNAPSHOT_ATTEMPTS = 3;
 /** Image tools reject very tall images; fullPage stops here by default. */
 const DEFAULT_FULL_PAGE_MAX_HEIGHT = 16_000;
 const DEFAULT_TILE_HEIGHT = 4_000;
+/** Tallest single capture behind a full-page screenshot; taller ones stitch. */
+const FULL_PAGE_REGION_HEIGHT = 4_000;
+/** Per-attempt timeouts for one full-page region (a stall is retried). */
+const FULL_PAGE_REGION_TIMEOUTS_MS = [5_000, 10_000, 20_000];
+let stitchedShotSeq = 0;
 const MAX_TILES = 50;
 const MAX_PDF_BYTES = 50 * 1024 * 1024;
 const DEFAULT_CONSENT_WAIT_MS = 1_000;
@@ -3581,65 +3588,193 @@ class Page {
           sessionId,
         );
       }
-      const size = await evaluateInSession<{ width: number; height: number }>(
-        this.#services,
-        sessionId,
-        "({ width: Math.max(document.documentElement.scrollWidth, innerWidth), height: Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0, innerHeight) })",
-        false,
-      );
-      const width = Math.max(1, Math.ceil(size?.width || 1));
-      const height = Math.max(1, Math.ceil(size?.height || 1));
-      if (tiles) {
-        const tileHeight = maxHeight ?? DEFAULT_TILE_HEIGHT;
-        const count = Math.min(MAX_TILES, Math.ceil(height / tileHeight));
-        const paths: string[] = [];
-        for (let i = 0; i < count; i += 1) {
-          const y = i * tileHeight;
-          paths.push(
-            await this.#services.screenshot(
-              path === undefined ? undefined : tilePath(path, i + 1),
+      const measure = () =>
+        evaluateInSession<{
+          width: number;
+          height: number;
+          x?: number;
+          y?: number;
+          vw?: number;
+        }>(
+          this.#services,
+          sessionId,
+          "({ width: Math.max(document.documentElement.scrollWidth, innerWidth), height: Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0, innerHeight), x: scrollX, y: scrollY, vw: innerWidth })",
+          false,
+        );
+      const size = await measure();
+      let width = Math.max(1, Math.ceil(size?.width || 1));
+      let height = Math.max(1, Math.ceil(size?.height || 1));
+      // A single captureBeyondViewport capture of a tall page stalls at
+      // random in headless Chrome for ~16 s, past the CDP timeout, and blocks
+      // the renderer meanwhile. Pages taller than one region are captured in
+      // regions instead: the viewport is emulated at the region height, each
+      // region is scrolled into view and captured as a plain viewport shot,
+      // and every capture gets its own short timeout with retries. Without
+      // emulation (a host that refuses it) regions fall back to
+      // captureBeyondViewport with the same retries.
+      let emulated = false;
+      const capturesRegions =
+        height >
+        Math.min(
+          FULL_PAGE_REGION_HEIGHT,
+          tiles ? Infinity : (maxHeight ?? DEFAULT_FULL_PAGE_MAX_HEIGHT),
+        );
+      if (capturesRegions) {
+        try {
+          await this.#services.cdp(
+            "Emulation.setDeviceMetricsOverride",
+            {
+              width: Math.max(1, Math.round(size?.vw || width)),
+              height: FULL_PAGE_REGION_HEIGHT,
+              deviceScaleFactor: 0,
+              mobile: false,
+            },
+            sessionId,
+          );
+          emulated = true;
+          const emulatedSize = await measure();
+          width = Math.max(1, Math.ceil(emulatedSize?.width || width));
+          height = Math.max(1, Math.ceil(emulatedSize?.height || height));
+        } catch {
+          emulated = false;
+        }
+      }
+      const scrollTo = (y: number) =>
+        evaluateInSession(
+          this.#services,
+          sessionId,
+          `scrollTo(0, ${y})`,
+          false,
+        );
+      const captureRegion = async (
+        regionPath: string | undefined,
+        y: number,
+        regionHeight: number,
+      ): Promise<string> => {
+        let lastError: unknown;
+        for (const [
+          attempt,
+          timeoutMs,
+        ] of FULL_PAGE_REGION_TIMEOUTS_MS.entries()) {
+          // A retry nudges the scroll position so Chrome paints a new frame.
+          if (attempt > 0) await scrollTo(y + 1);
+          await scrollTo(y);
+          try {
+            return await this.#services.screenshot(
+              regionPath,
               {
                 ...captureOptions,
-                full: true,
-                clip: {
-                  x: 0,
-                  y,
-                  width,
-                  height: Math.min(tileHeight, height - y),
-                },
+                full: !emulated,
+                timeoutMs,
+                clip: { x: 0, y, width, height: regionHeight },
               },
               sessionId,
-            ),
-          );
+            );
+          } catch (error) {
+            if (!isCdpRequestTimeoutError(error)) throw error;
+            lastError = error;
+          }
         }
-        if (count * tileHeight < height) {
+        throw Object.assign(
+          new Error(
+            `page.screenshot: the region at y=${y} (${regionHeight} px) did not capture after ${FULL_PAGE_REGION_TIMEOUTS_MS.length} attempts. Try a viewport screenshot, or a smaller maxHeight with tiles: true.`,
+            { cause: lastError },
+          ),
+          { code: "EGO_SCREENSHOT_TIMED_OUT" },
+        );
+      };
+      try {
+        if (tiles) {
+          const tileHeight = maxHeight ?? DEFAULT_TILE_HEIGHT;
+          const count = Math.min(MAX_TILES, Math.ceil(height / tileHeight));
+          const paths: string[] = [];
+          for (let i = 0; i < count; i += 1) {
+            const y = i * tileHeight;
+            const tileFile =
+              path === undefined ? undefined : tilePath(path, i + 1);
+            const tileBottom = Math.min(height, y + tileHeight);
+            if (tileBottom - y <= FULL_PAGE_REGION_HEIGHT) {
+              paths.push(await captureRegion(tileFile, y, tileBottom - y));
+            } else {
+              paths.push(
+                await this.#captureStitched(
+                  tileFile,
+                  y,
+                  tileBottom,
+                  captureRegion,
+                ),
+              );
+            }
+          }
+          if (count * tileHeight < height) {
+            bufferOutput(
+              `[ego-browser] page.screenshot: the page is ${height} px tall; ${count} tiles cover the top ${count * tileHeight} px. Pass a larger maxHeight for fewer, taller tiles.\n`,
+            );
+          }
+          return paths;
+        }
+        const limit = maxHeight ?? DEFAULT_FULL_PAGE_MAX_HEIGHT;
+        if (height > limit) {
           bufferOutput(
-            `[ego-browser] page.screenshot: the page is ${height} px tall; ${count} tiles cover the top ${count * tileHeight} px. Pass a larger maxHeight for fewer, taller tiles.\n`,
+            `[ego-browser] page.screenshot: the page is ${height} px tall; captured the top ${limit} px. Use { fullPage: true, tiles: true } for the whole page.\n`,
           );
         }
-        return paths;
-      }
-      const limit = maxHeight ?? DEFAULT_FULL_PAGE_MAX_HEIGHT;
-      if (height <= limit) {
-        return this.#services.screenshot(
-          path,
-          { ...captureOptions, full: true },
+        const bottom = Math.min(height, limit);
+        if (bottom <= FULL_PAGE_REGION_HEIGHT) {
+          return await captureRegion(path, 0, bottom);
+        }
+        return await this.#captureStitched(path, 0, bottom, captureRegion);
+      } finally {
+        if (emulated) {
+          await this.#services
+            .cdp("Emulation.clearDeviceMetricsOverride", {}, sessionId)
+            .catch(() => undefined);
+        }
+        await evaluateInSession(
+          this.#services,
           sessionId,
+          `scrollTo(${Math.round(size?.x || 0)}, ${Math.round(size?.y || 0)})`,
+          false,
+        ).catch(() => undefined);
+      }
+    });
+  }
+
+  /** Capture [top, bottom) in regions and join them into one PNG file. */
+  async #captureStitched(
+    path: string | undefined,
+    top: number,
+    bottom: number,
+    captureRegion: (
+      regionPath: string | undefined,
+      y: number,
+      regionHeight: number,
+    ) => Promise<string>,
+  ): Promise<string> {
+    const outputPath =
+      path ??
+      join(
+        tmpdir(),
+        `ego-browser-shot-${process.pid}-${Date.now()}-${++stitchedShotSeq}.png`,
+      );
+    const parts: string[] = [];
+    try {
+      for (let y = top; y < bottom; y += FULL_PAGE_REGION_HEIGHT) {
+        parts.push(
+          await captureRegion(
+            `${outputPath}.part-${parts.length + 1}.png`,
+            y,
+            Math.min(FULL_PAGE_REGION_HEIGHT, bottom - y),
+          ),
         );
       }
-      bufferOutput(
-        `[ego-browser] page.screenshot: the page is ${height} px tall; captured the top ${limit} px. Use { fullPage: true, tiles: true } for the whole page.\n`,
-      );
-      return this.#services.screenshot(
-        path,
-        {
-          ...captureOptions,
-          full: true,
-          clip: { x: 0, y: 0, width, height: limit },
-        },
-        sessionId,
-      );
-    });
+      const images = await Promise.all(parts.map((part) => readFile(part)));
+      await mkdir(dirname(outputPath), { recursive: true });
+      await writeFile(outputPath, stitchPngsVertically(images));
+      return outputPath;
+    } finally {
+      await Promise.all(parts.map((part) => rm(part, { force: true })));
+    }
   }
 
   async click(

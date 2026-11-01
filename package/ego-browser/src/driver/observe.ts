@@ -42,6 +42,8 @@ export type CaptureScreenshotOptions = {
   raw?: boolean;
   clip?: ScreenshotClip;
   scale?: ScreenshotScale;
+  /** Response timeout for the capture itself (CDP default otherwise). */
+  timeoutMs?: number;
 };
 
 export async function drainEvents() {
@@ -173,7 +175,12 @@ export async function captureScreenshotForSession(
       };
     }
   }
-  const result = await cdp("Page.captureScreenshot", params, sessionId);
+  const result = await cdp(
+    "Page.captureScreenshot",
+    params,
+    sessionId,
+    options.timeoutMs,
+  );
   await mkdir(dirname(outputPath), { recursive: true });
   await state.writeFile(outputPath, Buffer.from(result.data, "base64"));
   return outputPath;

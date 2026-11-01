@@ -10,12 +10,18 @@ let hasWarnedAboutFunctionJs = false;
  * @param {string} method CDP method name, for example Runtime.evaluate.
  * @param {object} [params] CDP command parameters.
  * @param {string} [sessionId] Optional attached target session id.
+ * @param {number} [timeoutMs] Optional response timeout in milliseconds.
  * @returns {Promise<object>} CDP result object.
  */
-export async function cdp(method, params: any = {}, sessionId = undefined) {
+export async function cdp(
+  method,
+  params: any = {},
+  sessionId = undefined,
+  timeoutMs: number | undefined = undefined,
+) {
   const result = state.cdpOverride
-    ? await state.cdpOverride(method, params, sessionId)
-    : (await browserCdp(method, params, sessionId)).result || {};
+    ? await state.cdpOverride(method, params, sessionId, timeoutMs)
+    : (await browserCdp(method, params, sessionId, timeoutMs)).result || {};
   if (
     !sessionId &&
     (method === "Network.enable" || method === "Network.disable")

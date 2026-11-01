@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -13,6 +14,7 @@ import { dirname, join } from "node:path";
 
 import { NativeOperationGate } from "../dist/src/native-gate.js";
 import { CdpRequestTimeoutError } from "../dist/src/browser-runtime.js";
+import { decodePng, encodePng } from "../dist/src/png-stitch.js";
 import { PageLedgerStore } from "../dist/src/page-ledger.js";
 import {
   captureTaskSpaceUserBoundary,
@@ -7331,62 +7333,191 @@ test("page.search reports blocked engines and falls through to the next", async 
   });
 });
 
+function tallPageTask(
+  fixture,
+  { height, stallFirstCaptureAt, refuseEmulation = false } = {},
+) {
+  let stalled = false;
+  return taskForRound(fixture, "round-a", {
+    async cdp(method, params, sessionId, timeoutMs) {
+      if (method.startsWith("Emulation.")) {
+        fixture.calls.push(["cdp", method, params, sessionId]);
+        if (refuseEmulation) throw new Error(`unsupported ${method}`);
+        return {};
+      }
+      if (
+        method === "Runtime.evaluate" &&
+        String(params.expression).includes(
+          "document.documentElement.scrollWidth, innerWidth",
+        )
+      ) {
+        return {
+          result: {
+            type: "object",
+            value: { width: 8, height, x: 0, y: 120 },
+          },
+        };
+      }
+      if (
+        method === "Runtime.evaluate" &&
+        String(params.expression).startsWith("scrollTo(")
+      ) {
+        fixture.calls.push(["scroll", params.expression]);
+        return { result: { type: "undefined" } };
+      }
+      return fixture.services.cdp(method, params, sessionId, timeoutMs);
+    },
+    async screenshot(path, options, sessionId) {
+      fixture.calls.push(["screenshot", path, options, sessionId]);
+      if (stallFirstCaptureAt === options.clip?.y && !stalled) {
+        stalled = true;
+        throw new CdpRequestTimeoutError(
+          "Page.captureScreenshot",
+          options.timeoutMs,
+          sessionId,
+        );
+      }
+      // A one-colour PNG of the clip size, coloured by its y offset.
+      const { width, height: h, y } = options.clip;
+      const rgba = Buffer.alloc(width * h * 4, (y / 1000) % 256);
+      const file = path || join(fixture.rootDir, `shot-${y}.png`);
+      await writeFile(file, encodePng({ width, height: h, rgba }));
+      return file;
+    },
+  });
+}
+
 test("fullPage screenshots stop at maxHeight or split into tiles", async () => {
   await withFixture(async (fixture) => {
-    const task = taskForRound(fixture, "round-a", {
-      async cdp(method, params, sessionId, timeoutMs) {
-        if (
-          method === "Runtime.evaluate" &&
-          String(params.expression).includes(
-            "document.documentElement.scrollWidth, innerWidth",
-          )
-        ) {
-          return {
-            result: { type: "object", value: { width: 800, height: 9000 } },
-          };
-        }
-        return fixture.services.cdp(method, params, sessionId, timeoutMs);
-      },
-    });
+    const task = tallPageTask(fixture, { height: 9000 });
     const page = await openTestPage(task, "https://example.test/tall");
+    const base = join(fixture.rootDir, "ego-tall.png");
     const tiles = await page.screenshot({
       fullPage: true,
       tiles: true,
-      path: "/tmp/ego-tall.png",
+      path: base,
     });
-    assert.deepEqual(tiles, [
-      "/tmp/ego-tall-1.png",
-      "/tmp/ego-tall-2.png",
-      "/tmp/ego-tall-3.png",
-    ]);
+    assert.deepEqual(
+      tiles,
+      [1, 2, 3].map((n) => base.replace(".png", `-${n}.png`)),
+    );
     const shots = fixture.calls.filter(([name]) => name === "screenshot");
     assert.deepEqual(
       shots.map(([, , options]) => options.clip),
       [
-        { x: 0, y: 0, width: 800, height: 4000 },
-        { x: 0, y: 4000, width: 800, height: 4000 },
-        { x: 0, y: 8000, width: 800, height: 1000 },
+        { x: 0, y: 0, width: 8, height: 4000 },
+        { x: 0, y: 4000, width: 8, height: 4000 },
+        { x: 0, y: 8000, width: 8, height: 1000 },
       ],
     );
-    await page.screenshot({ fullPage: true, maxHeight: 5000 });
+    assert(
+      shots.every(([, , options]) => options.full === false),
+      "regions are plain viewport captures of the emulated viewport",
+    );
+    const emulation = fixture.calls
+      .filter(([kind, method]) => kind === "cdp" && /^Emulation\./.test(method))
+      .map(([, method, params]) => [method, params]);
+    assert.deepEqual(emulation, [
+      [
+        "Emulation.setDeviceMetricsOverride",
+        { width: 8, height: 4000, deviceScaleFactor: 0, mobile: false },
+      ],
+      ["Emulation.clearDeviceMetricsOverride", {}],
+    ]);
+    assert(
+      shots.every(([, , options]) => options.timeoutMs === 5000),
+      "every region capture has its own short timeout",
+    );
     assert.deepEqual(
-      fixture.calls.filter(([name]) => name === "screenshot").at(-1)[2].clip,
-      {
-        x: 0,
-        y: 0,
-        width: 800,
-        height: 5000,
-      },
+      fixture.calls.filter(([name]) => name === "scroll").map(([, e]) => e),
+      [
+        "scrollTo(0, 0)",
+        "scrollTo(0, 4000)",
+        "scrollTo(0, 8000)",
+        "scrollTo(0, 120)",
+      ],
+      "each region is scrolled into view, then the scroll position is restored",
     );
-    await page.screenshot({ fullPage: true });
+
+    const capped = join(fixture.rootDir, "capped.png");
     assert.equal(
-      fixture.calls.filter(([name]) => name === "screenshot").at(-1)[2].clip,
-      undefined,
-      "a page under 16000 px is captured whole",
+      await page.screenshot({ fullPage: true, maxHeight: 5000, path: capped }),
+      capped,
     );
+    const cappedImage = decodePng(await readFile(capped));
+    assert.deepEqual([cappedImage.width, cappedImage.height], [8, 5000]);
+
+    const whole = join(fixture.rootDir, "whole.png");
+    await page.screenshot({ fullPage: true, path: whole });
+    const image = decodePng(await readFile(whole));
+    assert.deepEqual(
+      [image.width, image.height],
+      [8, 9000],
+      "a page under 16000 px is captured whole, stitched from regions",
+    );
+    // Rows keep their region's colour: 0 above 4000 px, 4 from 4000, 8 from 8000.
+    assert.equal(image.rgba[3999 * 8 * 4], 0);
+    assert.equal(image.rgba[4000 * 8 * 4], 4);
+    assert.equal(image.rgba[8999 * 8 * 4], 8);
+    const leftovers = (await readdir(fixture.rootDir)).filter((name) =>
+      name.includes(".part-"),
+    );
+    assert.deepEqual(leftovers, [], "region files are removed after stitching");
     await assert.rejects(
       () => page.screenshot({ tiles: true }),
       /need fullPage: true/,
+    );
+  });
+});
+
+test("full-page regions fall back to captureBeyondViewport without emulation", async () => {
+  await withFixture(async (fixture) => {
+    const task = tallPageTask(fixture, { height: 6000, refuseEmulation: true });
+    const page = await openTestPage(task, "https://example.test/tall");
+    const file = join(fixture.rootDir, "fallback.png");
+    assert.equal(await page.screenshot({ fullPage: true, path: file }), file);
+    const shots = fixture.calls.filter(([name]) => name === "screenshot");
+    assert.deepEqual(
+      shots.map(([, , options]) => [options.full, options.clip.y]),
+      [
+        [true, 0],
+        [true, 4000],
+      ],
+    );
+    assert(
+      !fixture.calls.some(
+        ([, method]) => method === "Emulation.clearDeviceMetricsOverride",
+      ),
+      "nothing to clear when the override was refused",
+    );
+    const image = decodePng(await readFile(file));
+    assert.deepEqual([image.width, image.height], [8, 6000]);
+  });
+});
+
+test("a stalled full-page region capture is retried, not fatal", async () => {
+  await withFixture(async (fixture) => {
+    const task = tallPageTask(fixture, {
+      height: 3000,
+      stallFirstCaptureAt: 0,
+    });
+    const page = await openTestPage(task, "https://example.test/tall");
+    const file = join(fixture.rootDir, "retry.png");
+    assert.equal(await page.screenshot({ fullPage: true, path: file }), file);
+    const shots = fixture.calls.filter(([name]) => name === "screenshot");
+    assert.deepEqual(
+      shots.map(([, , options]) => options.timeoutMs),
+      [5000, 10000],
+    );
+    assert.deepEqual(
+      fixture.calls.filter(([name]) => name === "scroll").map(([, e]) => e),
+      [
+        "scrollTo(0, 0)",
+        "scrollTo(0, 1)",
+        "scrollTo(0, 0)",
+        "scrollTo(0, 120)",
+      ],
+      "the retry nudges the scroll position so Chrome paints a new frame",
     );
   });
 });
