@@ -72,6 +72,12 @@ import {
   type PageKeyboardTypeOptions,
 } from "./driver/page-keyboard.js";
 import {
+  compileResponseMatcher,
+  ResponseCollector,
+  type CapturedResponse,
+  type ResponseMatcher,
+} from "./driver/network-capture.js";
+import {
   formatSnapshotStats,
   probePageState,
   snapshotStats,
@@ -196,6 +202,18 @@ type PageSnapshotOptions = Omit<SnapshotOptions, "root"> & {
   root?: string;
   format?: "text" | "object";
   settle?: boolean | PageSettleOptions;
+};
+
+type PageWaitForResponseOptions = {
+  timeout?: number;
+  maxBodyBytes?: number;
+};
+
+type PageCaptureResponsesOptions = {
+  match?: ResponseMatcher;
+  maxBodies?: number;
+  maxBodyBytes?: number;
+  maxTotalBytes?: number;
 };
 
 /** `page.snapshot({ format: "object" })`: the same text plus its parts. */
@@ -1531,6 +1549,32 @@ type PendingDownload = {
 };
 
 /** A file chooser intercepted before Chromium can open a native dialog. */
+/** Responses collected by page.captureResponses() until stop(). */
+class ResponseCapture {
+  readonly #collector: ResponseCollector;
+  readonly #unsubscribe: () => void;
+  #stopped?: Promise<CapturedResponse[]>;
+
+  constructor(collector: ResponseCollector, unsubscribe: () => void) {
+    this.#collector = collector;
+    this.#unsubscribe = unsubscribe;
+  }
+
+  /** The responses collected so far whose bodies are read. */
+  responses(): CapturedResponse[] {
+    return this.#collector.responses();
+  }
+
+  /** Stop collecting, wait for bodies being read, and return every response. */
+  stop(): Promise<CapturedResponse[]> {
+    this.#stopped ??= (async () => {
+      this.#unsubscribe();
+      return this.#collector.stop();
+    })();
+    return this.#stopped;
+  }
+}
+
 class FileChooser {
   readonly #services: PageModelServices;
   readonly #page: PageTarget;
@@ -1853,6 +1897,102 @@ class Page {
         warnings,
         ...(settle ? { settle } : {}),
       };
+    });
+  }
+
+  /**
+   * Wait for the next response this Page loads that matches a URL string,
+   * RegExp, or predicate, and resolve with its status, headers and parsed
+   * body. Arm it before the action that triggers the request.
+   */
+  waitForResponse(
+    matcher: ResponseMatcher,
+    options: PageWaitForResponseOptions = {},
+  ): Promise<CapturedResponse> {
+    validatePublicApiOptions("Page.waitForResponse", options);
+    compileResponseMatcher(matcher, "page.waitForResponse");
+    const timeoutMs = options.timeout ?? 10_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let settle!: {
+      resolve(response: CapturedResponse): void;
+      reject(error: unknown): void;
+    };
+    const outcome = new Promise<CapturedResponse>((resolve, reject) => {
+      settle = { resolve, reject };
+    });
+    // A timeout can land while the waiter is still arming; it is reported
+    // when the caller awaits, never as an unhandled rejection.
+    outcome.catch(() => {});
+    // The timeout starts now, like the Promise the caller is holding.
+    timer = setTimeout(() => {
+      settle.reject(
+        new Error(
+          `page.waitForResponse timed out after ${timeoutMs}ms waiting for ${describeResponseMatcher(matcher)}`,
+        ),
+      );
+    }, timeoutMs);
+    return (async () => {
+      let unsubscribe: (() => void) | undefined;
+      try {
+        unsubscribe = await this.#followResponses({
+          match: matcher,
+          ...(options.maxBodyBytes === undefined
+            ? {}
+            : { maxBodyBytes: options.maxBodyBytes }),
+          onResponse: (response) => settle.resolve(response),
+          onMatchError: (error) => settle.reject(error),
+        });
+        return await outcome;
+      } finally {
+        if (timer) clearTimeout(timer);
+        unsubscribe?.();
+      }
+    })();
+  }
+
+  /**
+   * Start collecting the responses this Page loads, with parsed bodies, until
+   * stop(). Without match it keeps fetch and XHR responses.
+   */
+  async captureResponses(
+    options: PageCaptureResponsesOptions = {},
+  ): Promise<ResponseCapture> {
+    validatePublicApiOptions("Page.captureResponses", options);
+    let collector!: ResponseCollector;
+    const unsubscribe = await this.#followResponses(options, (created) => {
+      collector = created;
+    });
+    return new ResponseCapture(collector, unsubscribe);
+  }
+
+  /** Subscribe a ResponseCollector to this Page and enable Network events. */
+  async #followResponses(
+    options: ConstructorParameters<typeof ResponseCollector>[2],
+    created?: (collector: ResponseCollector) => void,
+  ): Promise<() => void> {
+    const page = await this.#resolve();
+    return this.#services.gate.withPage(page, async ({ sessionId }) => {
+      const apiName = created
+        ? "page.captureResponses"
+        : "page.waitForResponse";
+      const collector = new ResponseCollector(
+        this.#services,
+        sessionId,
+        options,
+        apiName,
+      );
+      created?.(collector);
+      const unsubscribe = this.#services.subscribePageEvents(
+        page.targetId,
+        collector.handleEvent,
+      );
+      try {
+        await this.#services.ensureNetworkTracking([sessionId]);
+      } catch (error) {
+        unsubscribe();
+        throw error;
+      }
+      return unsubscribe;
     });
   }
 
@@ -3138,6 +3278,12 @@ class Page {
     await this.#services.cdp("Target.activateTarget", { targetId });
     this.#services.setPreferredTarget(targetId);
   }
+}
+
+function describeResponseMatcher(matcher: ResponseMatcher): string {
+  if (typeof matcher === "string") return JSON.stringify(matcher);
+  if (matcher instanceof RegExp) return matcher.toString();
+  return "a response predicate";
 }
 
 function snapshotSettleOptions(

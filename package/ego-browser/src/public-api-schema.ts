@@ -7,6 +7,7 @@ export type PublicApiOptionKind =
   | "pageRetention"
   | "positiveInteger"
   | "positiveMilliseconds"
+  | "responseMatcher"
   | "settle"
   | "string"
   | "stringRecord"
@@ -295,6 +296,66 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
         ["text", "object"],
       ),
     },
+  },
+  {
+    name: "Page.waitForResponse",
+    signature:
+      "page.waitForResponse(urlOrRegExpOrPredicate, { timeout?, maxBodyBytes? })",
+    returns:
+      "Promise<{ url, status, statusText, headers, mimeType, method?, resourceType?, fromCache, json?, text?, bodySize?, bodyOmitted? }> // json when the body parses, text otherwise",
+    summary:
+      "Wait for the next response this Page loads whose URL matches (a string matches as a glob or a substring; a predicate receives { url, status, method, mimeType, resourceType }), and resolve after its body has loaded. Arm it before the triggering action: const r = page.waitForResponse(/api/); await page.click(...); console.log((await r).json).",
+    options: {
+      timeout: option(
+        "positiveMilliseconds",
+        "Maximum wait in milliseconds; defaults to 10000.",
+      ),
+      maxBodyBytes: option(
+        "positiveInteger",
+        "Largest body kept, in bytes; defaults to 2 MB. Larger bodies are omitted with a reason.",
+      ),
+    },
+  },
+  {
+    name: "Page.captureResponses",
+    signature:
+      "await page.captureResponses({ match?, maxBodies?, maxBodyBytes?, maxTotalBytes? })",
+    returns:
+      "Promise<ResponseCapture> // call await capture.stop() for the responses",
+    summary:
+      "Start collecting the responses this Page loads, with parsed bodies, until capture.stop(). Without match it keeps fetch and XHR responses. Bodies stay in memory for this round only.",
+    options: {
+      match: option(
+        "responseMatcher",
+        "URL string (glob or substring), RegExp, or predicate receiving { url, status, method, mimeType, resourceType }.",
+      ),
+      maxBodies: option(
+        "positiveInteger",
+        "Bodies read before later responses keep only their metadata; defaults to 50.",
+      ),
+      maxBodyBytes: option(
+        "positiveInteger",
+        "Largest body kept, in bytes; defaults to 2 MB.",
+      ),
+      maxTotalBytes: option(
+        "positiveInteger",
+        "Total body bytes kept; defaults to 20 MB.",
+      ),
+    },
+  },
+  {
+    name: "ResponseCapture.responses",
+    signature: "capture.responses()",
+    returns: "Array<{ url, status, headers, json?, text?, ... }>",
+    summary: "Return the responses collected so far whose bodies are read.",
+  },
+  {
+    name: "ResponseCapture.stop",
+    signature: "await capture.stop()",
+    returns:
+      "Promise<Array<{ url, status, statusText, headers, mimeType, method?, resourceType?, fromCache, json?, text?, bodySize?, bodyOmitted? }>>",
+    summary:
+      "Stop collecting, wait for bodies still being read, and return every collected response in arrival order.",
   },
   {
     name: "Page.waitForSettled",
@@ -828,7 +889,8 @@ function displayName(name: string): string {
   return name
     .replace(/^TaskSpace/, "task")
     .replace(/^Page/, "page")
-    .replace(/^Download/, "download");
+    .replace(/^Download/, "download")
+    .replace(/^ResponseCapture/, "capture");
 }
 
 function validateOptionValue(
@@ -867,6 +929,12 @@ function validateOptionValue(
     case "positiveMilliseconds":
       valid = typeof value === "number" && Number.isFinite(value) && value > 0;
       break;
+    case "responseMatcher":
+      valid =
+        (typeof value === "string" && value.length > 0) ||
+        value instanceof RegExp ||
+        typeof value === "function";
+      break;
     case "settle":
       valid = typeof value === "boolean" || isPlainObject(value);
       break;
@@ -904,6 +972,11 @@ function validateOptionValue(
     if (specification.kind === "pageRetention") {
       throw new TypeError(
         `${apiName} ${optionName} must be "all" or an array of unique non-empty Page labels`,
+      );
+    }
+    if (specification.kind === "responseMatcher") {
+      throw new TypeError(
+        `${apiName} ${optionName} must be a non-empty URL string, a RegExp, or a function`,
       );
     }
     if (specification.kind === "settle") {

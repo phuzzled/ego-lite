@@ -6605,3 +6605,152 @@ test("waitForSettled resolves with what it saw and counts until matches", async 
     );
   });
 });
+
+/** Page event subscriptions and response bodies for the network tests. */
+function responseServices(fixture, bodies = {}) {
+  const listeners = new Map();
+  const network = {
+    overrides: {
+      subscribePageEvents(targetId, listener) {
+        const set = listeners.get(targetId) || new Set();
+        set.add(listener);
+        listeners.set(targetId, set);
+        return () => set.delete(listener);
+      },
+      async cdp(method, params, sessionId, timeoutMs) {
+        if (method === "Network.getResponseBody") {
+          return bodies[params.requestId] ?? { body: "", base64Encoded: false };
+        }
+        return fixture.services.cdp(method, params, sessionId, timeoutMs);
+      },
+    },
+    listenerCount(targetId) {
+      return listeners.get(targetId)?.size ?? 0;
+    },
+    respond(
+      targetId,
+      requestId,
+      url,
+      { type = "Fetch", mimeType = "application/json" } = {},
+    ) {
+      const emit = (method, params) => {
+        for (const listener of [...(listeners.get(targetId) || [])]) {
+          listener({ sessionId: `session:${targetId}`, method, params });
+        }
+      };
+      emit("Network.requestWillBeSent", {
+        requestId,
+        type,
+        request: { url, method: "GET" },
+      });
+      emit("Network.responseReceived", {
+        requestId,
+        type,
+        response: { url, status: 200, statusText: "OK", headers: {}, mimeType },
+      });
+      emit("Network.loadingFinished", { requestId, encodedDataLength: 20 });
+    },
+  };
+  return network;
+}
+
+test("waitForResponse arms before the action and resolves with the parsed body", async () => {
+  await withFixture(async (fixture) => {
+    const network = responseServices(fixture, {
+      "req-2": { body: '{"items":["a","b"]}', base64Encoded: false },
+    });
+    const task = taskForRound(fixture, "round-a", network.overrides);
+    const page = await openTestPage(task, "https://example.test/first");
+
+    const pending = page.waitForResponse(/\/api\/items/);
+    await page.click("#ready");
+    // Wait for the waiter to arm, then let the click's request answer.
+    while (network.listenerCount(page.targetId) === 0) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    network.respond(page.targetId, "req-1", "https://example.test/api/other");
+    network.respond(
+      page.targetId,
+      "req-2",
+      "https://example.test/api/items?q=a",
+    );
+    const response = await pending;
+
+    assert.equal(response.url, "https://example.test/api/items?q=a");
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.json, { items: ["a", "b"] });
+    assert.equal(
+      network.listenerCount(page.targetId),
+      0,
+      "the waiter unsubscribes",
+    );
+    assert(
+      fixture.calls.some(
+        ([kind, method]) => kind === "cdp" && method === "Network.enable",
+      ),
+    );
+  });
+});
+
+test("waitForResponse times out with the matcher in the message and validates input", async () => {
+  await withFixture(async (fixture) => {
+    const network = responseServices(fixture);
+    const task = taskForRound(fixture, "round-a", network.overrides);
+    const page = await openTestPage(task, "https://example.test/first");
+
+    await assert.rejects(
+      () => page.waitForResponse("/api/never", { timeout: 20 }),
+      (error) => {
+        assert.match(
+          error.message,
+          /page\.waitForResponse timed out after 20ms waiting for "\/api\/never"/,
+        );
+        return true;
+      },
+    );
+    assert.equal(network.listenerCount(page.targetId), 0);
+    assert.throws(
+      () => page.waitForResponse(42),
+      /matcher must be a non-empty URL string, a RegExp, or a function/,
+    );
+    assert.throws(
+      () => page.waitForResponse("/api", { maxBodyBytes: -1 }),
+      /maxBodyBytes must be a positive integer/,
+    );
+  });
+});
+
+test("captureResponses collects matching responses until stop", async () => {
+  await withFixture(async (fixture) => {
+    const network = responseServices(fixture, {
+      g1: { body: '{"data":1}', base64Encoded: false },
+      g2: { body: '{"data":2}', base64Encoded: false },
+    });
+    const task = taskForRound(fixture, "round-a", network.overrides);
+    const page = await openTestPage(task, "https://example.test/first");
+
+    const capture = await page.captureResponses({ match: "graphql" });
+    network.respond(page.targetId, "g1", "https://example.test/graphql?op=1");
+    network.respond(page.targetId, "skip", "https://example.test/rest");
+    network.respond(page.targetId, "g2", "https://example.test/graphql?op=2");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(capture.responses().length, 2);
+    const responses = await capture.stop();
+    network.respond(page.targetId, "g3", "https://example.test/graphql?op=3");
+
+    assert.deepEqual(
+      responses.map((response) => response.json),
+      [{ data: 1 }, { data: 2 }],
+    );
+    assert.equal(
+      await capture.stop(),
+      await capture.stop(),
+      "stop is idempotent",
+    );
+    assert.equal(network.listenerCount(page.targetId), 0);
+    await assert.rejects(
+      () => page.captureResponses({ match: 7 }),
+      /match must be a non-empty URL string, a RegExp, or a function/,
+    );
+  });
+});

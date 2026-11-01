@@ -413,7 +413,7 @@ const URL_REGEX_SPECIAL_CHARS = new Set([
 ]);
 
 /** Compile the URL-glob subset used by Playwright string matchers. */
-function urlGlobToRegExp(glob: string): RegExp {
+export function urlGlobToRegExp(glob: string): RegExp {
   const tokens = ["^"];
   let inGroup = false;
 
