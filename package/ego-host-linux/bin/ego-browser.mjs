@@ -295,7 +295,13 @@ async function mcpCommand(args) {
     toolTimeoutMs,
     ttlMs,
     log,
-    openSession: () => openSdkSession({ sdkPath, connect: connectWithHello }),
+    // browser_handoff issues the viewer link itself and returns it.
+    openSession: () =>
+      openSdkSession({
+        sdkPath,
+        connect: connectWithHello,
+        handOffViewer: false,
+      }),
   });
   const transport = runMcpStdio(server, {
     input: process.stdin,

@@ -24,18 +24,20 @@ const ROUND_SCRIPT =
  *        connect to (or start) the daemon and say hello
  * @param {(sdkPath: string) => Promise<object>} [options.importSdk]
  * @param {typeof createEgoBindings} [options.createBindings]
+ * @param {boolean} [options.handOffViewer]  see createEgoBindings
  */
 export async function openSdkSession({
   sdkPath,
   connect,
   importSdk = (path) => import(pathToFileURL(path).href),
   createBindings = createEgoBindings,
+  handOffViewer = true,
 }) {
   const { control, hello } = await connect();
   let ego;
   let module;
   try {
-    ego = await createBindings({ control, hello });
+    ego = await createBindings({ control, hello, handOffViewer });
     globalThis.ego = ego;
     // The SDK keys Page labels by browser run (see runNodejs in the CLI).
     process.env.EGO_BROWSER_INSTANCE_ID = hello.instanceId;
