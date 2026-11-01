@@ -525,7 +525,7 @@ test("runOneShot tables --out never writes through a symbolic link", async () =>
 });
 
 test("runOneShot shot saves to a private folder by default", async () => {
-  const { statSync } = await import("node:fs");
+  const { rmSync, statSync } = await import("node:fs");
   const { dirname } = await import("node:path");
   const page = fakePage({});
   const { session } = fakeSession(page);
@@ -538,6 +538,7 @@ test("runOneShot shot saves to a private folder by default", async () => {
   const saved = io.out.join("").trim();
   assert.match(saved, /ego-browser-shot-[^/]+\/a\.test-\d+\.png$/);
   assert.equal(statSync(dirname(saved)).mode & 0o777, 0o700);
+  rmSync(dirname(saved), { recursive: true, force: true });
 });
 
 test("runOneShot retries a navigation once after a network blip", async () => {
