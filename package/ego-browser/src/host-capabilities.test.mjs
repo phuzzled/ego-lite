@@ -62,3 +62,20 @@ test("unsupported features and resource limits carry a hint", () => {
     /ego-browser gc/,
   );
 });
+
+test("a getHostCapabilities that rejects never leaves an unhandled rejection", async () => {
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    // A native binding that answers unknown methods with a rejection.
+    const ego = {
+      getHostCapabilities: () => Promise.reject(new Error("unknown method")),
+    };
+    assert.deepEqual(hostCapabilities(ego), {});
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});

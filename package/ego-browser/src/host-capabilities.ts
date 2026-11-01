@@ -36,12 +36,13 @@ export function hostCapabilities(
       typeof ego.getHostCapabilities === "function"
         ? ego.getHostCapabilities()
         : undefined;
-    // A Promise here would be a future binding shape; treat it as unknown.
-    if (
-      value &&
-      typeof value === "object" &&
-      typeof value.then !== "function"
-    ) {
+    // A Promise here would be a future binding shape (or a native binding
+    // that answers every unknown method with a rejection); treat it as
+    // unknown, and never leave its rejection unhandled: that would end the
+    // round on Node's unhandled-rejection rule.
+    if (value && typeof value.then === "function") {
+      Promise.resolve(value).catch(() => undefined);
+    } else if (value && typeof value === "object") {
       result = { ...value };
     }
   } catch {
