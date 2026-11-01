@@ -1,6 +1,12 @@
 /** Find, launch and connect to the Chromium build used by ego lite on Linux. */
 import { spawn, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+} from "node:fs";
 import { join } from "node:path";
 
 import { dataDir, profileDir } from "./paths.mjs";
@@ -73,6 +79,7 @@ export async function launchBrowser(env = process.env, timeoutMs = 30_000) {
   const userDataDir = profileDir(env);
   mkdirSync(userDataDir, { recursive: true, mode: 0o700 });
   const portFile = join(userDataDir, "DevToolsActivePort");
+  await stopOrphanBrowser(userDataDir);
   rmSync(portFile, { force: true });
 
   const child = spawn(executable, browserArgs(env), {
@@ -89,8 +96,9 @@ export async function launchBrowser(env = process.env, timeoutMs = 30_000) {
   while (Date.now() < deadline) {
     if (child.exitCode !== null) {
       if (stderrTail.includes("ProcessSingleton")) {
+        const owner = profileLockPid(userDataDir);
         throw new Error(
-          `Another browser is using the ego lite profile ${userDataDir}. Stop it (for example: pkill -f '${userDataDir}') and try again.`,
+          `Another browser${owner ? ` (process ${owner})` : ""} is using the ego lite profile ${userDataDir}. Stop that process and try again.`,
         );
       }
       throw new Error(
@@ -107,4 +115,64 @@ export async function launchBrowser(env = process.env, timeoutMs = 30_000) {
   }
   child.kill();
   throw new Error(`Browser did not open its DevTools port: ${stderrTail}`);
+}
+
+/** Pid in the profile's SingletonLock link ("<hostname>-<pid>"), or null. */
+export function profileLockPid(userDataDir, readLink = readlinkSync) {
+  try {
+    const match = /-(\d+)$/.exec(readLink(join(userDataDir, "SingletonLock")));
+    return match ? Number(match[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The browser a crashed daemon left running, or null. Only a browser this
+ * host started (DevTools on port 0, this profile) counts; the caller holds
+ * the daemon lock, so no live daemon owns it.
+ */
+export function orphanBrowserPid(
+  userDataDir,
+  readLink = readlinkSync,
+  readCmdline = (pid) => readFileSync(`/proc/${pid}/cmdline`, "utf8"),
+) {
+  const pid = profileLockPid(userDataDir, readLink);
+  if (!pid) return null;
+  let command;
+  try {
+    // Chrome rewrites its title, so arguments may be joined by spaces
+    // rather than NUL bytes.
+    command = ` ${readCmdline(pid).replaceAll("\0", " ")} `;
+  } catch {
+    return null;
+  }
+  const ours =
+    command.includes(` --user-data-dir=${userDataDir} `) &&
+    command.includes(" --remote-debugging-port=0 ");
+  return ours ? pid : null;
+}
+
+async function stopOrphanBrowser(userDataDir, timeoutMs = 5_000) {
+  const pid = orphanBrowserPid(userDataDir);
+  if (!pid) return;
+  process.stderr.write(
+    `[ego-lite] stopping browser ${pid} left running by an earlier daemon\n`,
+  );
+  const signal = (name) => {
+    try {
+      process.kill(pid, name);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (!signal("SIGTERM")) return;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    if (!signal(0)) return;
+  }
+  signal("SIGKILL");
+  await new Promise((resolve) => setTimeout(resolve, 500));
 }
