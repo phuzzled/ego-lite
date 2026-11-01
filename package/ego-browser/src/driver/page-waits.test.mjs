@@ -526,6 +526,32 @@ test("navigateInPage explains an HTTP error status with an empty body", async ()
   );
 });
 
+test("navigateInPage retries once when the network changed during the load", async () => {
+  const navigations = [];
+  const services = {
+    async cdp(method, params) {
+      if (method === "Page.navigate") {
+        navigations.push(params.url);
+        return { errorText: "net::ERR_NETWORK_CHANGED" };
+      }
+      throw new Error(`unexpected CDP method: ${method}`);
+    },
+    now: () => 0,
+    async sleep() {},
+  };
+  await assert.rejects(
+    navigateInPage(services, "session:page", "https://example.com/", {
+      timeoutMs: 5_000,
+      waitUntil: "commit",
+    }),
+    { message: "page.goto failed: net::ERR_NETWORK_CHANGED" },
+  );
+  assert.deepEqual(navigations, [
+    "https://example.com/",
+    "https://example.com/",
+  ]);
+});
+
 test("navigateInPage keeps other navigation errors unchanged", async () => {
   const services = {
     async cdp() {

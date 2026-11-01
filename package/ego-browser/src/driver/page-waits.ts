@@ -419,6 +419,8 @@ function invalidURLGlobError(glob: string, reason: string): TypeError {
   return new TypeError(`Invalid URL glob ${JSON.stringify(glob)}: ${reason}`);
 }
 
+const NAVIGATION_ATTEMPTS = 2;
+
 /**
  * Chromium reports an HTTP error status with an empty body only as this net
  * error, without the status code. Page.navigate does not return the status.
@@ -453,16 +455,28 @@ export async function navigateInPage(
         navigationTimeRemaining(services, deadline, timeoutMs, waitUntil),
       );
     }
-    const response = await services.cdp(
-      "Page.navigate",
-      {
-        url,
-        ...(referer === undefined ? {} : { referrer: referer }),
-      },
-      sessionId,
-      navigationTimeRemaining(services, deadline, timeoutMs, waitUntil),
-    );
-    navigation = response?.result || response || {};
+    for (let attempt = 1; ; attempt += 1) {
+      const response = await services.cdp(
+        "Page.navigate",
+        {
+          url,
+          ...(referer === undefined ? {} : { referrer: referer }),
+        },
+        sessionId,
+        navigationTimeRemaining(services, deadline, timeoutMs, waitUntil),
+      );
+      navigation = response?.result || response || {};
+      // Chromium aborts a load when a network interface comes or goes (a
+      // container starting, a VPN reconnecting). Nothing was loaded; retry
+      // once, as a reload of the same URL would.
+      if (
+        navigation.errorText !== "net::ERR_NETWORK_CHANGED" ||
+        attempt >= NAVIGATION_ATTEMPTS ||
+        services.now() >= deadline
+      ) {
+        break;
+      }
+    }
     if (navigation.errorText) {
       throw new Error(
         `page.goto failed: ${navigation.errorText}${navigationErrorHint(navigation.errorText)}`,
