@@ -51,7 +51,35 @@ Ask the user for approval, then run:
 sh skills/ego-browser/scripts/install.sh
 ```
 
-There is no onboarding step on Linux. Continue with "After installing: confirm `ego-browser` is available". On a server without a display, the browser runs headless. Run `ego-browser status` to see the browser and task spaces, and `ego-browser stop` to close the browser.
+By default it installs the pinned release tag `linux-v0.1.1`. The installer prints the SHA-256 of the source archive it downloaded. The archive for `linux-v0.1.1` has this SHA-256:
+
+```text
+ec8da2cdc2fc9f0685294c9179970e0ccfaf2563b0c4da6b7b611428666b8547
+```
+
+To make the install stop on a mismatch, set `EGO_LITE_SHA256`:
+
+```bash
+EGO_LITE_SHA256=ec8da2cdc2fc9f0685294c9179970e0ccfaf2563b0c4da6b7b611428666b8547 sh skills/ego-browser/scripts/install.sh
+```
+
+`linux-v0.1.1` predates the one-shot commands, profiles, secrets, the tool server, and helpers such as `page.read()`. For those, install the newest code with `EGO_LITE_REF=main`. A branch archive changes with every commit, so it has no fixed checksum. Other installer options: `EGO_LITE_VIEWER=1` also installs xvfb, x11vnc and novnc (with sudo) for hand-off on a server, and `EGO_LITE_SERVICE=1` installs a systemd user service.
+
+There is no onboarding step on Linux. Continue with "After installing: confirm `ego-browser` is available". On a server without a display, the browser runs headless. Run `ego-browser status` to see the browser, task spaces and limits, and `ego-browser stop` to close the browser.
+
+### Linux: other ways in
+
+For a one-page job, a Linux host from `main` needs no script. Each command opens a throwaway task space, prints the result and closes the space:
+
+```bash
+ego-browser read https://example.com
+ego-browser tables https://en.wikipedia.org/wiki/List_of_largest_cities --csv --index 0
+ego-browser search "rust programming language" --max 5
+```
+
+`shot <url>` saves a screenshot and `snapshot <url>` prints a snapshot. Exit code 3 means a bot check blocked the page, 4 an HTTP error, 5 a timeout.
+
+Agents that cannot run shell commands can reach the same browser through the tool server built into the Linux host. Its setup for Claude Code, Codex, Cursor and other clients is in the Linux host README: https://github.com/phuzzled/ego-lite/blob/main/package/ego-host-linux/README.md
 
 ## Install on Windows
 
@@ -124,6 +152,10 @@ Once the environment is ready, return to the user's original task: run `ego-brow
 - **Not macOS or Linux**: `scripts/install.sh` supports macOS and Linux only. On Windows, have the user download and install from the ego lite website at https://lite.ego.app/.
 - **Linux: Node.js too old**: install Node.js 22 or newer, then rerun the script.
 - **Linux: browser does not start**: read `~/.local/state/ego-lite/daemon.log`. Chrome for Testing may need system libraries; the installer prints the `apt-get` line. Set `EGO_LITE_CHROME` to use another Chromium binary.
+- **Linux: `checksum mismatch`**: the downloaded archive is not the one you pinned. Check `EGO_LITE_REF` and `EGO_LITE_SHA256`; do not unset the checksum to get past it without asking the user.
+- **Linux: `Unknown command: read`** (or `search`, `secret`, `profiles`): the host is `linux-v0.1.1`. Reinstall with `EGO_LITE_REF=main`.
+- **Linux: `EGO_BROWSER_UNAVAILABLE` or "Cannot connect to browser"**: run `ego-browser stop`, then run the script again. If it fails again, read `~/.local/state/ego-lite/daemon.log`.
+- **Linux: `EGO_RESOURCE_LIMIT`**: the host is at its limit of task spaces, pages or memory. Run `ego-browser status`, then `ego-browser gc` to close idle agent spaces, or `ego-browser close <id>`.
 - **Download failed**: the script retries 3 times automatically; if it still fails, it's usually a network issue — have the user check their network and retry.
 - **Gatekeeper still blocks it (macOS)**: the script already tries to strip quarantine; if the first launch is still blocked, have the user allow ego lite manually under System Settings → Privacy & Security.
 - **SmartScreen blocks the installer (Windows)**: have the user choose "More info" and then "Run anyway" in the SmartScreen dialog.

@@ -11,6 +11,17 @@ and installation instructions for that host.
 - `ego-browser` available on the agent's `PATH`
 - An agent host that can read Skills and execute local shell commands
 
+## Linux
+
+There is no ego lite app for Linux. The Skill's `scripts/install.sh` installs
+the open-source Linux host from `package/ego-host-linux` instead: the pinned
+release `linux-v0.1.1` by default, or the newest code with `EGO_LITE_REF=main`.
+`skills/ego-browser/references/install.md` has the checksum, the one-shot
+commands (`ego-browser read <url>`, `search "<query>"`) and troubleshooting.
+`package/ego-host-linux/README.md` covers every host command, profiles,
+secrets, hand-off on a server and the service. `docs/agent-onboarding.md` is a
+brief to hand to an agent.
+
 ## Packaging
 
 From the repository root, build all nine artifacts with one command:
@@ -19,19 +30,19 @@ From the repository root, build all nine artifacts with one command:
 npm --prefix plugins/ego run package
 ```
 
-The output directory is `dist/plugins/ego-v2.1.0/`:
+The output directory is `dist/plugins/ego-v2.2.0/`:
 
 | Host             | Artifact                          | Contents                                            |
 | ---------------- | --------------------------------- | --------------------------------------------------- |
-| Claude Code      | `ego-claude-code-v2.1.0.zip`      | Claude plugin                                       |
-| Codex            | `ego-codex-v2.1.0.zip`            | Codex plugin at the archive root, plus marketplace  |
-| Cursor           | `ego-cursor-v2.1.0.zip`           | Cursor plugin                                       |
-| GitHub Copilot   | `ego-github-copilot-v2.1.0.zip`   | Claude-compatible plugin                            |
-| Grok Build       | `ego-grok-build-v2.1.0.zip`       | Agent Plugins manifest and Skill                    |
-| WorkBuddy        | `ego-workbuddy-v2.1.0.zip`        | Local marketplace and WorkBuddy/CodeBuddy manifests |
-| QwenWork Desktop | `ego-qwenwork-v2.1.0.zip`         | Claude-compatible expert kit                        |
-| OpenCode         | `ego-opencode-v2.1.0.tgz`         | `@citrolabs/ego-opencode` npm package               |
-| DeepSeek Harness | `ego-deepseek-harness-v2.1.0.tgz` | `@citrolabs/ego-deepseek-harness` npm bundle        |
+| Claude Code      | `ego-claude-code-v2.2.0.zip`      | Claude plugin                                       |
+| Codex            | `ego-codex-v2.2.0.zip`            | Codex plugin at the archive root, plus marketplace  |
+| Cursor           | `ego-cursor-v2.2.0.zip`           | Cursor plugin                                       |
+| GitHub Copilot   | `ego-github-copilot-v2.2.0.zip`   | Claude-compatible plugin                            |
+| Grok Build       | `ego-grok-build-v2.2.0.zip`       | Agent Plugins manifest and Skill                    |
+| WorkBuddy        | `ego-workbuddy-v2.2.0.zip`        | Local marketplace and WorkBuddy/CodeBuddy manifests |
+| QwenWork Desktop | `ego-qwenwork-v2.2.0.zip`         | Claude-compatible expert kit                        |
+| OpenCode         | `ego-opencode-v2.2.0.tgz`         | `@citrolabs/ego-opencode` npm package               |
+| DeepSeek Harness | `ego-deepseek-harness-v2.2.0.tgz` | `@citrolabs/ego-deepseek-harness` npm bundle        |
 
 Every ZIP includes a host-specific `README.md` at its root; npm archives include
 it under `package/`. The WorkBuddy ZIP contains a marketplace root with the
@@ -180,7 +191,7 @@ JavaScript entry point:
 
 ```bash
 mkdir -p /absolute/path/to/ego-opencode
-tar -xzf /absolute/path/to/ego-opencode-v2.1.0.tgz -C /absolute/path/to/ego-opencode
+tar -xzf /absolute/path/to/ego-opencode-v2.2.0.tgz -C /absolute/path/to/ego-opencode
 opencode plugin "file:///absolute/path/to/ego-opencode/package/index.js" -g
 ```
 
@@ -203,7 +214,7 @@ directory to the desired profile:
 
 ```bash
 mkdir -p /absolute/path/to/ego-deepseek-harness
-tar -xzf /absolute/path/to/ego-deepseek-harness-v2.1.0.tgz -C /absolute/path/to/ego-deepseek-harness
+tar -xzf /absolute/path/to/ego-deepseek-harness-v2.2.0.tgz -C /absolute/path/to/ego-deepseek-harness
 dsh plugin --profile web add /absolute/path/to/ego-deepseek-harness/package
 dsh --profile web --dump-config
 dsh --profile web
