@@ -601,15 +601,17 @@ export class TaskSpaceRegistry {
     return {
       nextId: this.#nextId,
       spaces: [...this.#spaces.values()].map((space) => {
-        const copy = structuredClone(space);
-        copy.tabUrls = {};
+        // Remember each URL on the live space too: after the browser dies
+        // targetInfo() knows nothing, and the save on shutdown must not
+        // replace the last known URLs with none.
+        const known = {};
         for (const targetId of space.targets) {
-          const url =
-            this.#browser.targetInfo(targetId)?.url ??
-            space.tabUrls?.[targetId];
-          if (url) copy.tabUrls[targetId] = url;
+          const live = this.#browser.targetInfo(targetId)?.url;
+          const url = live || space.tabUrls?.[targetId];
+          if (url) known[targetId] = url;
         }
-        return copy;
+        space.tabUrls = known;
+        return structuredClone(space);
       }),
     };
   }
