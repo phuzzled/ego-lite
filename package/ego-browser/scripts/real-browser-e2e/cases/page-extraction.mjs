@@ -40,6 +40,12 @@ export function pageReadCase() {
       "a selector that matches nothing fails clearly"
     );
 
+    await page.goto(baseUrl + "/extract/teasers");
+    const front = await page.read();
+    assertEqual(front.source, "main", "a page of teaser articles is read from <main>");
+    assertIncludes(front.markdown, "Teaser headline 1", "the first teaser is read");
+    assertIncludes(front.markdown, "Teaser headline 12", "the last teaser is read too");
+
     await page.goto(baseUrl + "/extract/no-article");
     const soup = await page.read();
     assertEqual(soup.source, "main", "the densest block wins without an <article>");

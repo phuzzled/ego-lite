@@ -36,6 +36,22 @@ export function handleExtractionFixture(url, res) {
         '<meta name="author" content="Ada Lovelace"><meta property="article:published_time" content="2026-10-31T09:00:00Z">',
       );
       return true;
+    case "/extract/teasers": {
+      const teasers = [];
+      for (let i = 1; i <= 12; i += 1) {
+        teasers.push(
+          `<article><h2><a href="/extract/story-${i}">Teaser headline ${i}</a></h2><p>Teaser ${i}: ${PARAGRAPH} ${PARAGRAPH} ${PARAGRAPH} ${PARAGRAPH}</p></article>`,
+        );
+      }
+      html(
+        res,
+        "Front page - Example News",
+        `<header><nav><a href="/home">Home nav link</a></nav></header>
+        <main><h1>Front page</h1>${teasers.join("")}</main>
+        <footer>Footer copyright text</footer>`,
+      );
+      return true;
+    }
     case "/extract/no-article":
       html(
         res,

@@ -182,8 +182,20 @@ export function extractReadable(options: {
     const articles = [...doc.querySelectorAll("article")]
       .map((element) => ({ element, length: textLength(element) }))
       .sort((a, b) => b.length - a.length);
-    if (articles[0] && articles[0].length >= 500) {
-      return { root: articles[0].element, source: "article" };
+    // A news front page has many teaser <article> elements of similar size;
+    // none of them is the page's content. Take the largest article only when
+    // it is the single one, clearly larger than the next, or a large part of
+    // the page, and never when it is tiny next to the page.
+    const [top, second] = articles;
+    if (
+      top &&
+      top.length >= 500 &&
+      top.length >= bodyText * 0.15 &&
+      (!second ||
+        top.length >= second.length * 2.5 ||
+        top.length >= bodyText * 0.4)
+    ) {
+      return { root: top.element, source: "article" };
     }
     for (const selector of [
       "main",
