@@ -1,10 +1,77 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
 
-import { bypassProxyForLoopback } from "./cdp-connection.mjs";
-import { webSocketServer } from "./test-support.mjs";
+import {
+  CdpConnection,
+  bypassProxyForLoopback,
+  frameReader,
+} from "./cdp-connection.mjs";
+import { proxyServer, webSocketServer } from "./test-support.mjs";
+
+describe("frameReader", () => {
+  it("splits NUL-framed messages across chunk borders", () => {
+    const frames = [];
+    const read = frameReader((frame) => frames.push(frame));
+    read('{"id":1}\0{"id"');
+    read(':2,"x":"');
+    read('a"}\0\0{"id":3}');
+    read("\0");
+    assert.deepEqual(frames, ['{"id":1}', '{"id":2,"x":"a"}', '{"id":3}']);
+  });
+});
+
+describe("CdpConnection over the DevTools pipe", () => {
+  it("sends NUL-terminated commands and resolves replies", async () => {
+    const toBrowser = new PassThrough();
+    const fromBrowser = new PassThrough();
+    const cdp = CdpConnection.fromPipe(fromBrowser, toBrowser);
+    toBrowser.setEncoding("utf8");
+    toBrowser.once("data", (chunk) => {
+      assert.ok(chunk.endsWith("\0"));
+      const { id, method } = JSON.parse(chunk.slice(0, -1));
+      assert.equal(method, "Browser.getVersion");
+      fromBrowser.write(`{"method":"Target.targetCreated","params":{}}\0`);
+      // A reply larger than one stream chunk.
+      fromBrowser.write(
+        `{"id":${id},"result":{"big":"${"x".repeat(200_000)}"}}\0`,
+      );
+    });
+    const events = [];
+    cdp.onMessage((_text, message) => events.push(message.method));
+    const result = await cdp.send("Browser.getVersion");
+    assert.equal(result.big.length, 200_000);
+    assert.deepEqual(events, ["Target.targetCreated"]);
+    fromBrowser.end();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(cdp.closed, true);
+  });
+});
+
+describe("CdpConnection.connectProxy", () => {
+  it("asks the daemon for the proxy, then speaks CDP on the socket", async () => {
+    const server = await proxyServer((text, reply) => {
+      const { id } = JSON.parse(text);
+      reply({ id, result: { via: "proxy" } });
+    });
+    try {
+      const cdp = await CdpConnection.connectProxy(server.path);
+      assert.deepEqual(await cdp.send("Browser.getVersion"), { via: "proxy" });
+      cdp.close();
+    } finally {
+      server.close();
+    }
+  });
+
+  it("fails clearly when no daemon listens", async () => {
+    await assert.rejects(
+      CdpConnection.connectProxy("/nonexistent/ego-lite.sock", 2_000),
+      /Cannot reach the ego lite daemon/,
+    );
+  });
+});
 
 describe("bypassProxyForLoopback", () => {
   it("sets NO_PROXY when no variable exists", () => {

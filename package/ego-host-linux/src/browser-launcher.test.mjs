@@ -3,7 +3,9 @@ import { describe, it } from "node:test";
 
 import {
   browserArgs,
+  devtoolsMode,
   orphanBrowserPid,
+  playwrightChromium,
   profileLockPid,
   splitArgs,
 } from "./browser-launcher.mjs";
@@ -103,5 +105,74 @@ describe("orphanBrowserPid", () => {
     };
     assert.equal(orphanBrowserPid(PROFILE, noLock, gone), null);
     assert.equal(orphanBrowserPid(PROFILE, lockTo("atlas-99"), gone), null);
+  });
+
+  it("finds a browser it started with the DevTools pipe", () => {
+    const read = cmdline(
+      "/opt/google/chrome/chrome",
+      "--remote-debugging-pipe",
+      `--user-data-dir=${PROFILE}`,
+    );
+    assert.equal(orphanBrowserPid(PROFILE, lockTo("atlas-77"), read), 77);
+  });
+});
+
+describe("DevTools transport", () => {
+  it("uses the pipe by default and never opens a port", () => {
+    const args = browserArgs({
+      EGO_LITE_HEADLESS: "1",
+      EGO_LITE_PROFILE_DIR: "/p",
+    });
+    assert.ok(args.includes("--remote-debugging-pipe"));
+    assert.equal(
+      args.some((arg) => /^--remote-(debugging-port|allow-origins)/.test(arg)),
+      false,
+    );
+  });
+
+  it("opens a loopback port only when asked", () => {
+    const env = { EGO_LITE_DEVTOOLS: "port", EGO_LITE_PROFILE_DIR: "/p" };
+    assert.equal(devtoolsMode(env), "port");
+    const args = browserArgs(env);
+    assert.ok(args.includes("--remote-debugging-port=0"));
+    assert.equal(args.includes("--remote-debugging-pipe"), false);
+  });
+
+  it("rejects an unknown mode", () => {
+    assert.throws(
+      () => devtoolsMode({ EGO_LITE_DEVTOOLS: "tcp" }),
+      /pipe or port/,
+    );
+  });
+
+  it("uses the basic password store on a virtual display", () => {
+    const args = browserArgs({
+      EGO_LITE_DISPLAY: "virtual",
+      DISPLAY: ":93",
+      EGO_LITE_PROFILE_DIR: "/p",
+    });
+    assert.ok(args.includes("--password-store=basic"));
+    assert.equal(args.includes("--headless=new"), false);
+  });
+});
+
+describe("playwrightChromium", () => {
+  it("picks the newest Chromium build in the Playwright cache", () => {
+    const found = playwrightChromium(
+      { HOME: "/home/u" },
+      () => ["chromium-1100", "chromium-1200", "firefox-1"],
+      (path) => /chromium-1(1|2)00\/chrome-linux\/chrome$/.test(path),
+    );
+    assert.equal(
+      found,
+      "/home/u/.cache/ms-playwright/chromium-1200/chrome-linux/chrome",
+    );
+  });
+
+  it("returns null without a cache", () => {
+    const missing = () => {
+      throw new Error("ENOENT");
+    };
+    assert.equal(playwrightChromium({ HOME: "/h" }, missing), null);
   });
 });

@@ -86,7 +86,9 @@ export class ControlClient {
       }, timeoutMs);
       socket.once("connect", () => {
         clearTimeout(timer);
-        resolve(new ControlClient(socket));
+        const client = new ControlClient(socket);
+        client.path = path;
+        resolve(client);
       });
       socket.once("error", (error) => {
         clearTimeout(timer);
