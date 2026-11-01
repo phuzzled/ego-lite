@@ -19,9 +19,13 @@ export async function searchAndExtract(ctx, args = {}) {
     return url.includes('/sorry/') || !!document.querySelector('#captcha-form, form[action*="sorry"]') ? url : ''
   })()`);
   if (blocked) {
-    throw new Error(
+    const error = new Error(
       `Google blocked the search and asked for a CAPTCHA (${blocked}). Hand the task space to the user to solve it, or use another search engine.`,
     );
+    error.error_code = "EGO_SITE_BLOCKED";
+    error.hint =
+      'Use page.search(query, { engine: "bing" }) or the bing site tool, or hand the task space to the user. Do not try to bypass the check.';
+    throw error;
   }
 
   const results = await ctx.js(String.raw`(() => {
@@ -34,4 +38,27 @@ export async function searchAndExtract(ctx, args = {}) {
   })()`);
 
   return results;
+}
+
+/**
+ * v2: Google search with a Page. Throws EGO_SITE_BLOCKED on the /sorry/
+ * check, which headless browsers on servers usually get.
+ */
+export async function search(page, args = {}) {
+  const query = typeof args.query === "string" ? args.query.trim() : "";
+  if (!query) throw new Error("google search: query is required");
+  const max = boundedInteger(args.maxResults, 10, 50);
+  const result = await page.search(query, { engine: "google", max });
+  if (result.engine === null) {
+    const block = result.blocked[0] || {};
+    const error = new Error(
+      `google search was blocked: ${block.reason || "no results could be read"} (${block.url || "https://www.google.com"})`,
+    );
+    error.error_code = "EGO_SITE_BLOCKED";
+    error.hint =
+      block.hint ||
+      'Use engine "bing", or hand the task space to the user. Do not try to bypass the check.';
+    throw error;
+  }
+  return result.results;
 }

@@ -202,3 +202,18 @@ test("top-level return and await parse like the real script body", () => {
     [],
   );
 });
+
+test("new Page and TaskSpace methods are linted from the schema", () => {
+  assert.deepEqual(
+    rules(
+      `${PRELUDE}console.log(String(page.read()));\npage.dismissConsent();\ntask.memo("k", 1);`,
+    ),
+    ["3:missing-await", "4:missing-await", "5:missing-await"],
+  );
+  assert.deepEqual(
+    rules(
+      `${PRELUDE}for await (const p of page.paginate({ next: "a" })) {}\nconst s = page.site("bing");`,
+    ),
+    [],
+  );
+});

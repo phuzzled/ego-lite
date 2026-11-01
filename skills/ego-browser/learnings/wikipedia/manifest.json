@@ -1,0 +1,57 @@
+{
+  "id": "wikipedia",
+  "name": "Wikipedia",
+  "domains": ["wikipedia.org", "*.wikipedia.org"],
+  "notes": ["notes/overview.md"],
+  "nodeTools": {
+    "summary": {
+      "api": 2,
+      "description": "Fetch an article's summary (title, description, extract, URL) from the Wikipedia REST API.",
+      "path": "tools/summary.js",
+      "callable": "summary",
+      "args": {
+        "title": {
+          "type": "string",
+          "required": true,
+          "description": "Article title, such as \"Web browser\"."
+        },
+        "lang": {
+          "type": "string",
+          "required": false,
+          "description": "Language subdomain, default en."
+        }
+      },
+      "returns": {
+        "type": "object",
+        "description": "{ title, description, extract, url, lastModified }."
+      }
+    },
+    "article": {
+      "api": 2,
+      "description": "Open an article and return it as Markdown with its data tables.",
+      "path": "tools/article.js",
+      "callable": "article",
+      "args": {
+        "title": {
+          "type": "string",
+          "required": true,
+          "description": "Article title."
+        },
+        "lang": {
+          "type": "string",
+          "required": false,
+          "description": "Language subdomain, default en."
+        },
+        "maxChars": {
+          "type": "integer",
+          "required": false,
+          "description": "Cut the Markdown before this many characters (default 50000)."
+        }
+      },
+      "returns": {
+        "type": "object",
+        "description": "{ url, title, markdown, truncated, tables: [{ caption, headers, rows }] }."
+      }
+    }
+  }
+}

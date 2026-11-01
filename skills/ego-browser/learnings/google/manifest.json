@@ -1,11 +1,17 @@
 {
   "id": "google",
   "name": "Google Search",
-  "domains": ["google.com", "*.google.com", "www.google.com"],
-  "notes": ["notes/overview.md"],
+  "domains": [
+    "google.com",
+    "*.google.com",
+    "www.google.com"
+  ],
+  "notes": [
+    "notes/overview.md"
+  ],
   "nodeTools": {
     "search_and_extract": {
-      "description": "Perform a Google search and extract top organic results.",
+      "description": "Perform a Google search and extract top organic results (v1 helper API; throws EGO_SITE_BLOCKED on a CAPTCHA).",
       "path": "tools/search-extract.js",
       "callable": "searchAndExtract",
       "args": {
@@ -23,6 +29,28 @@
       "returns": {
         "type": "array",
         "description": "Array of {title, url, snippet} objects."
+      }
+    },
+    "search": {
+      "api": 2,
+      "description": "Search Google with the Page (v2). Throws EGO_SITE_BLOCKED when Google shows its /sorry/ check, which headless browsers on servers usually get; use the bing site tool there.",
+      "path": "tools/search-extract.js",
+      "callable": "search",
+      "args": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "description": "Search query string."
+        },
+        "maxResults": {
+          "type": "integer",
+          "required": false,
+          "description": "Maximum number of results (1-50, default 10)."
+        }
+      },
+      "returns": {
+        "type": "array",
+        "description": "Array of { rank, title, url, snippet }."
       }
     }
   },

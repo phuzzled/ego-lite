@@ -3,6 +3,7 @@ export type PublicApiOptionKind =
   | "clip"
   | "finiteNumber"
   | "nonNegativeNumber"
+  | "nonNegativeInteger"
   | "nonEmptyString"
   | "pageRetention"
   | "positiveInteger"
@@ -76,14 +77,23 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   },
   {
     name: "taskSpace",
-    signature: "await taskSpace(nameOrId, { profileId? })",
+    signature:
+      "await taskSpace(nameOrId, { profileId?, ttlMs?, restorePages? })",
     returns: "Promise<TaskSpace>",
     summary:
-      "Reuse or create an Agent-owned task space; a name held by a user-owned space fails with EGO_TASK_SPACE_NAME_IN_USE. A new space starts with managed Page p1, and profileId applies only when creating it.",
+      "Reuse or create an Agent-owned task space; a name held by a user-owned space fails with EGO_TASK_SPACE_NAME_IN_USE. A new space starts with managed Page p1, and profileId and ttlMs apply only when creating it.",
     options: {
       profileId: option(
         "nonEmptyString",
         "Browser profile id returned by profiles(); new spaces only.",
+      ),
+      ttlMs: option(
+        "positiveInteger",
+        "Close the space after this long without use (hosts with a task-space TTL, such as Linux; ignored elsewhere); new spaces only.",
+      ),
+      restorePages: option(
+        "boolean",
+        "After a browser restart, reopen the space's lost Pages with their labels (task.restorePages(); hosts that support it).",
       ),
     },
   },
@@ -180,9 +190,60 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   },
   {
     name: "TaskSpace.handOff",
-    signature: "await task.handOff()",
-    returns: "Promise<void>",
-    summary: "Give control of this space to the user.",
+    signature: "await task.handOff({ relay? })",
+    returns:
+      "Promise<void> // with relay: Promise<{ relay: { dir, screenshot, snapshot, url, title } }>",
+    summary:
+      "Give control of this space to the user. With relay: true (hosts that support it, such as a headless Linux server) the agent keeps control and gets a screenshot and snapshot to show the user, then does what the user says.",
+    options: {
+      relay: option(
+        "boolean",
+        "Keep control and return screenshot and snapshot paths for the user instead of handing off.",
+      ),
+    },
+  },
+  {
+    name: "TaskSpace.memo",
+    signature: "await task.memo(key, value?)",
+    returns:
+      "Promise<any> // the stored value, or undefined when the key is not set",
+    summary:
+      "A small JSON store kept with this space by the host, so a re-run can skip finished steps: memo(key) reads, memo(key, value) writes, memo(key, null) deletes. finish() clears it. Hosts without it throw EGO_UNSUPPORTED_ON_HOST.",
+  },
+  {
+    name: "TaskSpace.restorePages",
+    signature: "await task.restorePages()",
+    returns: "Promise<{ pages: Array<{ label, url }>, skipped: string[] }>",
+    summary:
+      "After a browser restart, reopen the space's lost http(s) tabs (GET only; form state is lost) and give them back their Page labels. Hosts without it throw EGO_UNSUPPORTED_ON_HOST.",
+  },
+  {
+    name: "TaskSpace.map",
+    signature:
+      "await task.map(urls, async (page, url, index) => value, { concurrency?, navigate?, timeout?, waitUntil? })",
+    returns:
+      "Promise<Array<{ url, index, ok: true, value } | { url, index, ok: false, error, error_code? }>> // in input order",
+    summary:
+      "Run the same work on many URLs with up to concurrency Pages (default 3, within the Page budget) that are reused and closed afterwards. Each Page goes to its URL first unless navigate is false; one failure does not stop the others.",
+    options: {
+      concurrency: option(
+        "positiveInteger",
+        "Pages used at once; defaults to 3.",
+      ),
+      navigate: option(
+        "boolean",
+        "Go to each URL before calling fn; defaults to true.",
+      ),
+      timeout: option(
+        "positiveMilliseconds",
+        "Navigation timeout per URL in milliseconds.",
+      ),
+      waitUntil: option(
+        "string",
+        "Navigation completion state; defaults to load.",
+        ["commit", "domcontentloaded", "load", "networkidle"],
+      ),
+    },
   },
   {
     name: "TaskSpace.finish",
@@ -387,10 +448,20 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.screenshot",
     signature:
-      "await page.screenshot({ path?, fullPage?, clip?, scale?, raw? })",
-    returns: "Promise<string> // the PNG file path",
-    summary: "Capture this Page to a PNG file.",
+      "await page.screenshot({ path?, fullPage?, maxHeight?, tiles?, clip?, scale?, raw? })",
+    returns:
+      "Promise<string> // the PNG file path. With tiles: Promise<string[]>",
+    summary:
+      "Capture this Page to a PNG file. fullPage stops at maxHeight (16000 CSS px by default, with a notice); tiles: true splits the full page into several images of maxHeight (default 4000) each.",
     options: {
+      maxHeight: option(
+        "positiveInteger",
+        "With fullPage: the tallest image in CSS pixels (default 16000), or each tile's height with tiles (default 4000).",
+      ),
+      tiles: option(
+        "boolean",
+        "With fullPage: return several images that together cover the page.",
+      ),
       path: option(
         "string",
         "Absolute output path; missing parent directories are created.",
@@ -403,6 +474,204 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
         ["css"],
       ),
       raw: option("boolean", "Bypass device-pixel-ratio correction."),
+    },
+  },
+  {
+    name: "Page.read",
+    signature: "await page.read({ mode?, selector?, maxChars?, timeout? })",
+    returns:
+      'Promise<{ url, title, byline?, published?, lang?, markdown, links: [{ text, href }], words, truncated, source, pages?, warning? }> // source: "article" | "main" | "body" | "selector" | "pdf"',
+    summary:
+      "Read this Page as Markdown: the main article without navigation, ads or footers, with absolute links. Far smaller than a snapshot; use it to read, and a snapshot to act. A PDF (in the viewer or at a .pdf URL) returns its text with pages: [{ n, text }]. A warning is set when the page has very little text.",
+    options: {
+      mode: option(
+        "string",
+        "article (default) picks the main content; full reads the whole body.",
+        ["article", "full"],
+      ),
+      selector: option(
+        "nonEmptyString",
+        "CSS selector of the element to read.",
+      ),
+      maxChars: option(
+        "positiveInteger",
+        "Cut the Markdown at a heading or paragraph before this many characters and set truncated; defaults to 100000.",
+      ),
+      timeout: option(
+        "positiveMilliseconds",
+        "Maximum extraction time in milliseconds; defaults to 20000.",
+      ),
+    },
+  },
+  {
+    name: "Page.tables",
+    signature:
+      "await page.tables({ selector?, index?, csv?, saveAs?, includeHidden? })",
+    returns:
+      "Promise<Array<{ index, caption?, selector, kind, headers: string[], rows: Array<Record<header, string>>, rowCount, csv? }>>",
+    summary:
+      'Read the tables (and ARIA grids) on this Page as rows keyed by header. rowspan and colspan are expanded, multi-row headers joined with " / ", spacer rows and footnote markers dropped; values stay text as shown. Layout and hidden tables are skipped unless selector names them.',
+    options: {
+      selector: option(
+        "nonEmptyString",
+        "CSS selector of a table, or of an element whose tables to read.",
+      ),
+      index: option(
+        "nonNegativeInteger",
+        "Return only the table at this index in the result.",
+      ),
+      csv: option("boolean", "Add a csv string to each table."),
+      saveAs: option(
+        "nonEmptyString",
+        "Absolute path to write one table as CSV; needs exactly one table (use index).",
+      ),
+      includeHidden: option("boolean", "Also read hidden tables."),
+    },
+  },
+  {
+    name: "Page.structuredData",
+    signature: "await page.structuredData()",
+    returns:
+      "Promise<{ url, title, description?, canonical?, lang?, jsonLd: object[], openGraph: object, twitter: object, microdata: object[], errors? }>",
+    summary:
+      "Read what this Page declares about itself: JSON-LD (with @graph flattened), OpenGraph and Twitter card tags, the meta description, the canonical URL and schema.org microdata.",
+  },
+  {
+    name: "Page.search",
+    signature: "await page.search(query, { engine?, max?, timeout? })",
+    returns:
+      "Promise<{ engine, query, url?, results: [{ rank, title, url, snippet }], blocked: [{ engine, url, reason, hint }], noResults? }> // engine is null when every engine was blocked",
+    summary:
+      "Search the web in this Page and read the results. An engine that shows a bot check or an unreadable page is listed in blocked, never returned as empty results; with engine auto the next engine is tried. Bing usually works from servers; Google and DuckDuckGo often block automated browsers. Never try to bypass a check.",
+    options: {
+      engine: option(
+        "string",
+        "Engine to use; auto (default) tries bing, then duckduckgo, then google (EGO_BROWSER_SEARCH_ENGINE picks the first).",
+        ["auto", "bing", "duckduckgo", "google"],
+      ),
+      max: option("positiveInteger", "Most results to return; defaults to 10."),
+      timeout: option(
+        "positiveMilliseconds",
+        "Navigation timeout per engine in milliseconds; defaults to 15000.",
+      ),
+    },
+  },
+  {
+    name: "Page.dismissConsent",
+    signature: "await page.dismissConsent({ prefer?, timeout? })",
+    returns:
+      'Promise<{ found, action: "reject" | "accept" | "none", framework?, clicked?, frame?, dismissed?, reason? }>',
+    summary:
+      "Close a cookie or consent banner, choosing Reject all or Necessary only. Known platforms (OneTrust, Cookiebot, Didomi, Quantcast, TrustArc, Usercentrics, Sourcepoint and more) first, then a text match inside a dialog. When a banner offers only Accept, nothing is clicked unless prefer is accept; use accept only when the user asked for it.",
+    options: {
+      prefer: option(
+        "string",
+        "reject (default) never accepts; accept clicks Accept all.",
+        ["reject", "accept"],
+      ),
+      timeout: option(
+        "positiveMilliseconds",
+        "How long to wait for a late banner, in milliseconds; defaults to 1000.",
+      ),
+    },
+  },
+  {
+    name: "Page.scrollToLoad",
+    signature:
+      "await page.scrollToLoad({ itemSelector?, maxItems?, maxScrolls?, idleMs?, timeout? })",
+    returns:
+      "Promise<{ items?, scrolls, height, stoppedBecause, ms }> // stoppedBecause: maxItems reached, no new items, maxScrolls reached, timeout",
+    summary:
+      "Scroll an infinite list until it stops growing: stops at maxItems matches of itemSelector, when nothing new appears for idleMs, after maxScrolls, or at the timeout.",
+    options: {
+      itemSelector: option(
+        "nonEmptyString",
+        "Selector, loc= locator or CSS for one list item; counts progress.",
+      ),
+      maxItems: option("positiveInteger", "Stop once this many items match."),
+      maxScrolls: option(
+        "positiveInteger",
+        "Most scroll steps; defaults to 30.",
+      ),
+      idleMs: option(
+        "positiveMilliseconds",
+        "Stop when nothing new appears for this long; defaults to 1500.",
+      ),
+      timeout: option(
+        "positiveMilliseconds",
+        "Total time limit in milliseconds; defaults to 60000.",
+      ),
+    },
+  },
+  {
+    name: "Page.paginate",
+    signature:
+      "for await (const p of page.paginate({ next, maxPages?, timeout? })) { ... }",
+    returns: "AsyncGenerator<Page> // yields this Page once per result page",
+    summary:
+      "Visit this page and each next page: yields this Page, then clicks next, waits until the content changes and settles, and yields again. Stops after maxPages, when next is missing or disabled, or when a click changes nothing.",
+    options: {
+      next: option(
+        "nonEmptyString",
+        "Selector or loc= locator of the Next link or button.",
+      ),
+      maxPages: option(
+        "positiveInteger",
+        "Most pages to yield, the first included; defaults to 10.",
+      ),
+      timeout: option(
+        "positiveMilliseconds",
+        "Wait for each next page in milliseconds; defaults to 15000.",
+      ),
+    },
+  },
+  {
+    name: "Page.site",
+    signature: "page.site(siteId)",
+    returns: "SiteTools // { id, tools(), notes(), run(name, args) }",
+    summary:
+      "Use a site's learned tools with this Page. List sites and tools with siteTools(url or id).",
+  },
+  {
+    name: "SiteTools.tools",
+    signature: "await page.site(siteId).tools()",
+    returns:
+      'Promise<Array<{ name, kind: "node" | "browser", api, description, args, returns? }>>',
+    summary: "List the site's tools with their arguments.",
+  },
+  {
+    name: "SiteTools.notes",
+    signature: "await page.site(siteId).notes()",
+    returns: "Promise<Array<{ file, content }>>",
+    summary: "Read the site's notes (Markdown) on how the site works.",
+  },
+  {
+    name: "SiteTools.run",
+    signature: "await page.site(siteId).run(toolName, args?)",
+    returns: "Promise<any> // the tool's result",
+    summary:
+      'Run a site tool with this Page: a Node tool declared with "api": 2 receives (page, args); a browser tool runs inside this Page. A v1 tool explains how to run it with runSiteTool.',
+  },
+  {
+    name: "siteTools",
+    signature: "await siteTools(urlOrSiteId?)",
+    returns:
+      "Promise<Array<{ site, name, kind, api, description, args, returns?, usage }>>",
+    summary:
+      "List learned site tools: for one URL or domain, one site id, or every site when called with no argument. usage shows how to call each.",
+  },
+  {
+    name: "readPdf",
+    signature: "await readPdf(absolutePath, { maxChars? })",
+    returns:
+      'Promise<{ url, title, markdown, pages: [{ n, text }], words, truncated, source: "pdf", warning? }>',
+    summary:
+      "Read the text of a PDF file already on disk (from a download or page.fetch(url, { saveAs })). Text-based PDFs only; a scanned or encrypted PDF returns a warning.",
+    options: {
+      maxChars: option(
+        "positiveInteger",
+        "Cut the Markdown before this many characters; defaults to 100000.",
+      ),
     },
   },
   {
@@ -890,6 +1159,7 @@ function displayName(name: string): string {
     .replace(/^TaskSpace/, "task")
     .replace(/^Page/, "page")
     .replace(/^Download/, "download")
+    .replace(/^SiteTools/, "site")
     .replace(/^ResponseCapture/, "capture");
 }
 
@@ -915,6 +1185,9 @@ function validateOptionValue(
       break;
     case "nonEmptyString":
       valid = typeof value === "string" && value.length > 0;
+      break;
+    case "nonNegativeInteger":
+      valid = Number.isInteger(value) && (value as number) >= 0;
       break;
     case "pageRetention":
       valid =
@@ -962,6 +1235,11 @@ function validateOptionValue(
     if (specification.kind === "nonEmptyString") {
       throw new TypeError(
         `${apiName} ${optionName} must be a non-empty string`,
+      );
+    }
+    if (specification.kind === "nonNegativeInteger") {
+      throw new TypeError(
+        `${apiName} ${optionName} must be a non-negative integer`,
       );
     }
     if (specification.kind === "positiveInteger") {

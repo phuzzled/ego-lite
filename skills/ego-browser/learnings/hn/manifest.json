@@ -1,0 +1,35 @@
+{
+  "id": "hn",
+  "name": "Hacker News",
+  "domains": ["news.ycombinator.com", "hn.algolia.com"],
+  "notes": ["notes/overview.md"],
+  "nodeTools": {
+    "search": {
+      "api": 2,
+      "description": "Search Hacker News stories through the public Algolia API.",
+      "path": "tools/search.js",
+      "callable": "search",
+      "args": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "description": "Search query."
+        },
+        "maxResults": {
+          "type": "integer",
+          "required": false,
+          "description": "Most stories to return (1-100, default 20)."
+        },
+        "sort": {
+          "type": "string",
+          "required": false,
+          "description": "relevance (default) or date."
+        }
+      },
+      "returns": {
+        "type": "array",
+        "description": "Array of { title, url, hnUrl, points, comments, author, createdAt }."
+      }
+    }
+  }
+}

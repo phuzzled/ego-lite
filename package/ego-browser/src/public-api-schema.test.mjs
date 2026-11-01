@@ -151,3 +151,47 @@ test("every public API entry says what it resolves to", () => {
     }
   }
 });
+
+test("the round-2 APIs are in the schema with validated options", () => {
+  const names = new Set(PUBLIC_API_SCHEMA.map((entry) => entry.name));
+  for (const name of [
+    "Page.read",
+    "Page.tables",
+    "Page.structuredData",
+    "Page.search",
+    "Page.dismissConsent",
+    "Page.scrollToLoad",
+    "Page.paginate",
+    "Page.site",
+    "SiteTools.run",
+    "SiteTools.tools",
+    "SiteTools.notes",
+    "siteTools",
+    "readPdf",
+    "TaskSpace.memo",
+    "TaskSpace.restorePages",
+    "TaskSpace.map",
+  ]) {
+    assert(names.has(name), `missing public API schema entry: ${name}`);
+  }
+  validatePublicApiOptions("Page.tables", { index: 0, csv: true });
+  validatePublicApiOptions("taskSpace", { ttlMs: 60_000, restorePages: true });
+  validatePublicApiOptions("TaskSpace.handOff", { relay: true });
+  validatePublicApiOptions("Page.screenshot", {
+    fullPage: true,
+    tiles: true,
+    maxHeight: 4000,
+  });
+  assert.throws(
+    () => validatePublicApiOptions("Page.tables", { index: -1 }),
+    /index must be a non-negative integer/,
+  );
+  assert.throws(
+    () => validatePublicApiOptions("Page.dismissConsent", { prefer: "all" }),
+    /prefer must be one of reject, accept/,
+  );
+  assert.throws(
+    () => validatePublicApiOptions("SiteTools.run", {}),
+    /no options for SiteTools.run/,
+  );
+});

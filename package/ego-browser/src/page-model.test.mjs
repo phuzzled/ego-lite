@@ -6899,3 +6899,569 @@ test("captureResponses collects matching responses until stop", async () => {
     );
   });
 });
+
+/** Host-extension services backed by an in-memory memo store. */
+function hostServices(capabilities, extra = {}) {
+  const memo = new Map(Object.entries(extra.memo || {}));
+  const events = [];
+  return {
+    memo,
+    events,
+    overrides: {
+      hostCapabilities: () => capabilities,
+      async taskSpaceMemo(key, write) {
+        events.push(["memo", key, write ? write.value : undefined]);
+        if (write) {
+          if (write.value === null) memo.delete(key);
+          else memo.set(key, write.value);
+          return { found: write.value !== null, value: write.value };
+        }
+        return memo.has(key)
+          ? { found: true, value: memo.get(key) }
+          : { found: false, value: null };
+      },
+      logEvent(entry) {
+        events.push(["log", entry]);
+      },
+      ...extra.overrides,
+    },
+  };
+}
+
+test("task.memo reads, writes and deletes through the host", async () => {
+  await withFixture(async (fixture) => {
+    const host = hostServices({ taskSpaceMemo: true });
+    const task = taskForRound(fixture, "round-a", host.overrides);
+
+    assert.equal(await task.memo("step"), undefined);
+    assert.deepEqual(await task.memo("step", { done: 1 }), { done: 1 });
+    assert.deepEqual(await task.memo("step"), { done: 1 });
+    assert.equal(await task.memo("step", null), undefined);
+    assert.equal(await task.memo("step"), undefined);
+    await assert.rejects(() => task.memo("__ego.pageUrls"), /reserved/);
+    await assert.rejects(() => task.memo(""), /non-empty string key/);
+    await assert.rejects(() => task.memo("k", undefined), /JSON-serializable/);
+    await assert.rejects(() => task.memo("k", 1, 2), /accepts \(key\)/);
+    assert(
+      fixture.calls.some(([name, id]) => name === "selectSpace" && id === 7),
+      "memo runs with the space selected",
+    );
+  });
+});
+
+test("host extensions fail clearly on a host without them", async () => {
+  await withFixture(async (fixture) => {
+    const task = taskForRound(fixture, "round-a", {
+      hostCapabilities: () => ({}),
+    });
+    for (const call of [
+      () => task.memo("k"),
+      () => task.restorePages(),
+      () => task.handOff({ relay: true }),
+    ]) {
+      await assert.rejects(call, (error) => {
+        assert.equal(error.error_code, "EGO_UNSUPPORTED_ON_HOST");
+        assert.match(error.message, /not supported on this browser host/);
+        return true;
+      });
+    }
+  });
+});
+
+test("goto remembers each label's URL so restorePages can relabel tabs", async () => {
+  await withFixture(async (fixture) => {
+    const host = hostServices({
+      taskSpaceMemo: true,
+      restoreTaskSpaceTabs: true,
+    });
+    const task = taskForRound(fixture, "round-a", host.overrides);
+    const p1 = await openTestPage(task, "https://example.test/one");
+    await openTestPage(task, "https://example.test/two");
+    assert.deepEqual(host.memo.get("__ego.pageUrls"), {
+      [p1.label]: "https://example.test/one",
+      p2: "https://example.test/two",
+    });
+
+    // A browser restart: the ledger is new and the tabs are gone.
+    const restartedLedger = new PageLedgerStore({
+      rootDir: join(fixture.rootDir, "after-restart"),
+    });
+    const restored = taskForRound(fixture, "round-b", {
+      ...host.overrides,
+      ledger: restartedLedger,
+      async restoreTaskSpaceTabs() {
+        fixture.addExternalTab("target-r2", "https://example.test/two");
+        fixture.addExternalTab("target-r1", "https://example.test/one");
+        fixture.addExternalTab("target-r3", "https://example.test/new");
+        return {
+          tabs: [
+            { targetId: "target-r2", url: "https://example.test/two" },
+            { targetId: "target-r1", url: "https://example.test/one" },
+            { targetId: "target-r3", url: "https://example.test/new" },
+          ],
+          skipped: ["file:///tmp/x"],
+        };
+      },
+    });
+    const result = await restored.restorePages();
+    assert.deepEqual(result.pages, [
+      { label: "p2", url: "https://example.test/two" },
+      { label: "p1", url: "https://example.test/one" },
+      { label: "p3", url: "https://example.test/new" },
+    ]);
+    assert.deepEqual(result.skipped, ["file:///tmp/x"]);
+    const pages = (await restartedLedger.read(7)).pages;
+    assert.equal(pages.p1.targetId, "target-r1");
+    assert.equal(pages.p2.targetId, "target-r2");
+    assert.equal(pages.p1.openedBy, "agent");
+  });
+});
+
+test("handOff with relay keeps control and returns the relay files", async () => {
+  await withFixture(async (fixture) => {
+    const lifecycle = [];
+    const task = taskForRound(fixture, "round-a", {
+      hostCapabilities: () => ({ handOffRelay: true }),
+      async handOffRelay() {
+        lifecycle.push("relay");
+        return { relay: { screenshot: "/tmp/s.png", snapshot: "/tmp/s.txt" } };
+      },
+      async handOffTaskSpace() {
+        lifecycle.push("handOff");
+      },
+    });
+    const page = await openTestPage(task, "https://example.test/one");
+    assert.deepEqual(await task.handOff({ relay: true }), {
+      relay: { screenshot: "/tmp/s.png", snapshot: "/tmp/s.txt" },
+    });
+    assert.deepEqual(lifecycle, ["relay"]);
+    await page.goto("https://example.test/two");
+    await assert.rejects(
+      () => task.handOff({ relay: "yes" }),
+      /relay must be boolean/,
+    );
+  });
+});
+
+test("Page actions are written to the host round log without values", async () => {
+  await withFixture(async (fixture) => {
+    const host = hostServices({ logEvent: true });
+    const task = taskForRound(fixture, "round-a", host.overrides);
+    const page = await openTestPage(task, "https://example.test/path?q=secret");
+    await page.fill("#name", "typed secret");
+    await assert.rejects(() => page.click("#name", { trial: true }));
+    const logs = host.events
+      .filter(([kind]) => kind === "log")
+      .map(([, entry]) => entry);
+    const goto = logs.find((entry) => entry.action === "page.goto");
+    assert.equal(goto.target, "https://example.test");
+    assert.equal(goto.page, page.label);
+    assert.equal(goto.ok, true);
+    assert.equal(typeof goto.ms, "number");
+    const fill = logs.find((entry) => entry.action === "page.fill");
+    assert.equal(fill.target, "#name");
+    assert(!JSON.stringify(logs).includes("secret"), "no values or queries");
+    const failed = logs.find((entry) => entry.action === "page.click");
+    assert.equal(failed.ok, false);
+  });
+});
+
+test("Page actions are not logged on a host without a round log", async () => {
+  await withFixture(async (fixture) => {
+    const host = hostServices({});
+    const task = taskForRound(fixture, "round-a", host.overrides);
+    await openTestPage(task, "https://example.test/one");
+    assert.equal(host.events.filter(([kind]) => kind === "log").length, 0);
+  });
+});
+
+test("task.map runs every URL on reused Pages and reports failures", async () => {
+  await withFixture(async (fixture) => {
+    const task = taskForRound(fixture, "round-a");
+    const seen = [];
+    const results = await task.map(
+      [
+        "https://example.test/a",
+        "https://example.test/b",
+        "https://example.test/c",
+      ],
+      async (page, url, index) => {
+        seen.push(page.label);
+        if (index === 1) throw new Error("boom");
+        return `${index}:${url}`;
+      },
+      { concurrency: 2 },
+    );
+    assert.deepEqual(
+      results.map((result) => result.ok),
+      [true, false, true],
+    );
+    assert.equal(results[0].value, "0:https://example.test/a");
+    assert.equal(results[1].error, "boom");
+    assert.equal(new Set(seen).size, 2, "two Pages are reused");
+    assert.equal((await task.pages()).length, 0, "the Pages are closed");
+    assert.deepEqual(await task.map([], () => 1), []);
+    await assert.rejects(() => task.map("x", () => 1), /array of URL strings/);
+    await assert.rejects(
+      () => task.map([], () => 1, { concurrency: 0 }),
+      /concurrency must be a positive integer/,
+    );
+  });
+});
+
+/** Answer isolated-world extraction calls with fixed values. */
+function isolatedServices(fixture, answers) {
+  const evaluations = [];
+  return {
+    evaluations,
+    overrides: {
+      async cdp(method, params, sessionId, timeoutMs) {
+        if (method === "Page.getFrameTree") {
+          return { frameTree: { frame: { id: "frame-main" } } };
+        }
+        if (method === "Page.createIsolatedWorld") {
+          return { executionContextId: 42 };
+        }
+        if (method === "Runtime.evaluate" && params.contextId === 42) {
+          evaluations.push(params.expression);
+          for (const [marker, value] of answers) {
+            if (params.expression.includes(marker)) {
+              return { result: { type: "object", value } };
+            }
+          }
+          return { result: { type: "undefined" } };
+        }
+        return fixture.services.cdp(method, params, sessionId, timeoutMs);
+      },
+    },
+  };
+}
+
+test("page.read runs in an isolated world and truncates Markdown", async () => {
+  await withFixture(async (fixture) => {
+    const body = Array.from(
+      { length: 50 },
+      (_v, i) => `## Part ${i}\n\n${"text ".repeat(30).trim()}`,
+    ).join("\n\n");
+    const { evaluations, overrides } = isolatedServices(fixture, [
+      ["embed[original-url]", { pdf: false, url: "https://example.test/a" }],
+      [
+        "SKIP_TAGS",
+        {
+          url: "https://example.test/a",
+          title: "A",
+          markdown: `# A\n\n${body}`,
+          links: [],
+          source: "article",
+        },
+      ],
+    ]);
+    const task = taskForRound(fixture, "round-a", overrides);
+    const page = await openTestPage(task, "https://example.test/a");
+    const result = await page.read({ maxChars: 1000 });
+    assert.equal(result.truncated, true);
+    assert(result.markdown.length <= 1000);
+    assert.equal(result.source, "article");
+    assert(result.words > 30);
+    assert.equal(evaluations.length, 2, "PDF check, then extraction");
+    await assert.rejects(
+      () => page.read({ mode: "full", selector: "main" }),
+      /mode or selector, not both/,
+    );
+    await assert.rejects(() => page.read({ mode: "all" }), /must be one of/);
+  });
+});
+
+test("page.read explains a selector error and warns on a near-empty page", async () => {
+  await withFixture(async (fixture) => {
+    let answer = { error: "selector matched no element: #x" };
+    const task = taskForRound(fixture, "round-a", {
+      async cdp(method, params, sessionId, timeoutMs) {
+        if (method === "Page.getFrameTree") {
+          return { frameTree: { frame: { id: "f" } } };
+        }
+        if (method === "Page.createIsolatedWorld") {
+          return { executionContextId: 9 };
+        }
+        if (method === "Runtime.evaluate" && params.contextId === 9) {
+          return { result: { type: "object", value: answer } };
+        }
+        return fixture.services.cdp(method, params, sessionId, timeoutMs);
+      },
+    });
+    const page = await openTestPage(task, "https://example.test/a");
+    await assert.rejects(
+      () => page.read({ selector: "#x" }),
+      (error) => {
+        assert.match(error.message, /page\.read: selector matched no element/);
+        assert.match(error.hint, /snapshot/);
+        return true;
+      },
+    );
+    answer = {
+      url: "https://example.test/a",
+      title: "A",
+      markdown: "Loading",
+      links: [],
+      source: "body",
+    };
+    const thin = await page.read({ selector: "body" });
+    assert.match(thin.warning, /very little readable text/);
+  });
+});
+
+test("page.tables turns grids into rows and writes one table as CSV", async () => {
+  await withFixture(async (fixture) => {
+    const { overrides } = isolatedServices(fixture, [
+      [
+        "SKIP_TABLE",
+        {
+          tables: [
+            {
+              kind: "table",
+              selector: "#t",
+              caption: "Scores",
+              grid: [
+                ["Name", "Score"],
+                ["Ann", "1,000"],
+              ],
+              headerRows: 1,
+            },
+            {
+              kind: "grid",
+              selector: "#g",
+              grid: [["x"], ["y"]],
+              headerRows: 0,
+            },
+          ],
+        },
+      ],
+    ]);
+    const task = taskForRound(fixture, "round-a", overrides);
+    const page = await openTestPage(task, "https://example.test/a");
+    const tables = await page.tables();
+    assert.equal(tables.length, 2);
+    assert.deepEqual(tables[0].rows, [{ Name: "Ann", Score: "1,000" }]);
+    assert.equal(tables[0].caption, "Scores");
+    assert.equal(tables[0].csv, undefined, "CSV only when asked");
+    const path = join(fixture.rootDir, "out", "t.csv");
+    const [saved] = await page.tables({ index: 0, saveAs: path });
+    assert.equal(await readFile(path, "utf8"), 'Name,Score\r\nAnn,"1,000"\r\n');
+    assert.equal(saved.csv, 'Name,Score\r\nAnn,"1,000"\r\n');
+    await assert.rejects(
+      () => page.tables({ saveAs: path }),
+      /writes one table, but 2 matched; pass index/,
+    );
+    await assert.rejects(
+      () => page.tables({ index: 5 }),
+      /out of range: found 2 tables/,
+    );
+    await assert.rejects(
+      () => page.tables({ index: -1 }),
+      /non-negative integer/,
+    );
+    await assert.rejects(
+      () => page.tables({ index: 0, saveAs: "relative.csv" }),
+      /absolute/,
+    );
+  });
+});
+
+test("page.search reports blocked engines and falls through to the next", async () => {
+  await withFixture(async (fixture) => {
+    const pages = {
+      bing: { url: "https://www.bing.com/search?q=x", results: [] },
+      duckduckgo: {
+        url: "https://html.duckduckgo.com/html/?q=x",
+        results: [
+          {
+            title: "Result",
+            url: "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fa.test%2F",
+            snippet: "S",
+          },
+        ],
+      },
+      google: {
+        url: "https://www.google.com/sorry/index",
+        blocked: "Google showed its unusual-traffic check (/sorry/)",
+        results: [],
+      },
+    };
+    const task = taskForRound(fixture, "round-a", {
+      async cdp(method, params, sessionId, timeoutMs) {
+        if (method === "Page.getFrameTree") {
+          return { frameTree: { frame: { id: "f" } } };
+        }
+        if (method === "Page.createIsolatedWorld") {
+          return { executionContextId: 3 };
+        }
+        if (method === "Runtime.evaluate" && params.contextId === 3) {
+          const engine = /"engine":"(\w+)"/.exec(
+            JSON.parse(
+              /JSON\.parse\(("(?:[^"\\]|\\.)*")\)/.exec(params.expression)[1],
+            ),
+          )[1];
+          return { result: { type: "object", value: pages[engine] } };
+        }
+        return fixture.services.cdp(method, params, sessionId, timeoutMs);
+      },
+    });
+    const page = await task.newPage();
+    const auto = await page.search("x");
+    assert.equal(auto.engine, "duckduckgo");
+    assert.equal(
+      auto.results[0].url,
+      "https://a.test/",
+      "tracking links unwrap",
+    );
+    assert.equal(auto.blocked.length, 1);
+    assert.equal(auto.blocked[0].engine, "bing");
+    assert.match(auto.blocked[0].reason, /no results could be read/);
+
+    const google = await page.search("x", { engine: "google" });
+    assert.equal(google.engine, null);
+    assert.deepEqual(google.results, []);
+    assert.match(google.blocked[0].reason, /sorry/);
+    assert.match(google.blocked[0].hint, /bing/);
+    await assert.rejects(() => page.search(" "), /non-empty query/);
+    await assert.rejects(
+      () => page.search("x", { engine: "yahoo" }),
+      /engine must be one of auto, bing, duckduckgo, google/,
+    );
+  });
+});
+
+test("fullPage screenshots stop at maxHeight or split into tiles", async () => {
+  await withFixture(async (fixture) => {
+    const task = taskForRound(fixture, "round-a", {
+      async cdp(method, params, sessionId, timeoutMs) {
+        if (
+          method === "Runtime.evaluate" &&
+          String(params.expression).includes(
+            "document.documentElement.scrollWidth, innerWidth",
+          )
+        ) {
+          return {
+            result: { type: "object", value: { width: 800, height: 9000 } },
+          };
+        }
+        return fixture.services.cdp(method, params, sessionId, timeoutMs);
+      },
+    });
+    const page = await openTestPage(task, "https://example.test/tall");
+    const tiles = await page.screenshot({
+      fullPage: true,
+      tiles: true,
+      path: "/tmp/ego-tall.png",
+    });
+    assert.deepEqual(tiles, [
+      "/tmp/ego-tall-1.png",
+      "/tmp/ego-tall-2.png",
+      "/tmp/ego-tall-3.png",
+    ]);
+    const shots = fixture.calls.filter(([name]) => name === "screenshot");
+    assert.deepEqual(
+      shots.map(([, , options]) => options.clip),
+      [
+        { x: 0, y: 0, width: 800, height: 4000 },
+        { x: 0, y: 4000, width: 800, height: 4000 },
+        { x: 0, y: 8000, width: 800, height: 1000 },
+      ],
+    );
+    await page.screenshot({ fullPage: true, maxHeight: 5000 });
+    assert.deepEqual(
+      fixture.calls.filter(([name]) => name === "screenshot").at(-1)[2].clip,
+      {
+        x: 0,
+        y: 0,
+        width: 800,
+        height: 5000,
+      },
+    );
+    await page.screenshot({ fullPage: true });
+    assert.equal(
+      fixture.calls.filter(([name]) => name === "screenshot").at(-1)[2].clip,
+      undefined,
+      "a page under 16000 px is captured whole",
+    );
+    await assert.rejects(
+      () => page.screenshot({ tiles: true }),
+      /need fullPage: true/,
+    );
+  });
+});
+
+test("page.site runs v2 Node tools with the Page and explains v1 tools", async () => {
+  await withFixture(async (fixture) => {
+    const workspace = join(fixture.rootDir, "workspace");
+    const site = join(workspace, "learnings", "demo");
+    await mkdir(join(site, "tools"), { recursive: true });
+    await mkdir(join(site, "browser-tools"), { recursive: true });
+    await mkdir(join(site, "notes"), { recursive: true });
+    const schema = (path, callable, api) => ({
+      description: "tool",
+      path,
+      ...(callable ? { callable } : {}),
+      ...(api ? { api } : {}),
+      args: {},
+      returns: { type: "object", description: "value" },
+    });
+    await writeFile(
+      join(site, "manifest.json"),
+      JSON.stringify({
+        id: "demo",
+        name: "Demo",
+        domains: ["demo.test"],
+        notes: ["notes/overview.md"],
+        nodeTools: {
+          v2: schema("tools/v2.js", "run", 2),
+          v1: schema("tools/v2.js", "run"),
+        },
+        browserTools: { title: schema("browser-tools/title.js") },
+      }),
+    );
+    await writeFile(
+      join(site, "tools", "v2.js"),
+      "export async function run(page, args) { return { label: page.label, args }; }",
+    );
+    await writeFile(
+      join(site, "browser-tools", "title.js"),
+      "async (args) => 'title:' + args.n",
+    );
+    await writeFile(join(site, "notes", "overview.md"), "# Demo notes\n");
+    const task = taskForRound(fixture, "round-a", {
+      agentWorkspace: () => workspace,
+    });
+    const page = await openTestPage(task, "https://demo.test/");
+    const demo = page.site("demo");
+    assert.deepEqual(await demo.run("v2", { q: 1 }), {
+      label: page.label,
+      args: { q: 1 },
+    });
+    await assert.rejects(
+      () => demo.run("v1"),
+      (error) => {
+        assert.match(error.message, /uses the v1 helper API/);
+        assert.match(error.hint, /runSiteTool\("demo", "v1"/);
+        return true;
+      },
+    );
+    await assert.rejects(() => demo.run("missing"), /tools: v2, v1, title/);
+    assert.deepEqual(
+      (await demo.tools()).map((tool) => [tool.name, tool.kind, tool.api]),
+      [
+        ["v2", "node", 2],
+        ["v1", "node", 1],
+        ["title", "browser", 2],
+      ],
+    );
+    assert.deepEqual(await demo.notes(), [
+      { file: "notes/overview.md", content: "# Demo notes\n" },
+    ]);
+    await assert.rejects(
+      () => page.site("nope").tools(),
+      /site skill not found/,
+    );
+    assert.throws(() => page.site(""), /requires a site id/);
+  });
+});

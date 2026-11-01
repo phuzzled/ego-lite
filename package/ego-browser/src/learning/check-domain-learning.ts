@@ -18,6 +18,8 @@ export interface ToolSchema {
 
 export interface NodeToolSchema extends ToolSchema {
   callable: string;
+  /** 2: the tool takes (page, args) with a v2 Page; 1 or absent: (ctx, args). */
+  api?: 1 | 2;
 }
 
 export interface LearningManifest {

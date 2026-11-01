@@ -1,0 +1,40 @@
+{
+  "id": "reddit",
+  "name": "Reddit",
+  "domains": ["reddit.com", "*.reddit.com"],
+  "notes": ["notes/overview.md"],
+  "nodeTools": {
+    "listing": {
+      "api": 2,
+      "description": "Read a subreddit listing or a search through Reddit's .json endpoints. Throws EGO_SITE_BLOCKED when Reddit refuses the browser.",
+      "path": "tools/listing.js",
+      "callable": "listing",
+      "args": {
+        "subreddit": {
+          "type": "string",
+          "required": false,
+          "description": "Subreddit name without r/; omit to search all of Reddit."
+        },
+        "query": {
+          "type": "string",
+          "required": false,
+          "description": "Search words; omit to list the subreddit."
+        },
+        "sort": {
+          "type": "string",
+          "required": false,
+          "description": "hot (default), new, top, or relevance for a search."
+        },
+        "maxResults": {
+          "type": "integer",
+          "required": false,
+          "description": "Most posts to return (1-100, default 25)."
+        }
+      },
+      "returns": {
+        "type": "array",
+        "description": "Array of { title, url, permalink, subreddit, author, score, comments, createdAt }."
+      }
+    }
+  }
+}

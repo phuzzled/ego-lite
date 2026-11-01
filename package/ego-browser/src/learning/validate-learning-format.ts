@@ -203,6 +203,15 @@ function validateToolSchema(
   if (typeof schema.description !== "string" || !schema.description.trim()) {
     errors.push(`${prefix}: description must be a non-empty string`);
   }
+  if (schema.api !== undefined) {
+    if (key !== "nodeTools") {
+      errors.push(`${prefix}: api applies to Node tools only`);
+    } else if (schema.api !== 1 && schema.api !== 2) {
+      errors.push(
+        `${prefix}: api must be 1 (v1 helper context) or 2 (a v2 Page)`,
+      );
+    }
+  }
   if (key === "nodeTools") {
     if (!isNodeToolPath(schema.path)) {
       errors.push(`${prefix}: path must be a relative tools/*.js path`);

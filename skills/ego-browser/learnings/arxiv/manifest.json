@@ -1,0 +1,30 @@
+{
+  "id": "arxiv",
+  "name": "arXiv",
+  "domains": ["arxiv.org", "export.arxiv.org"],
+  "notes": ["notes/overview.md"],
+  "nodeTools": {
+    "search": {
+      "api": 2,
+      "description": "Search arXiv papers through its Atom API and return metadata with abstract and PDF links.",
+      "path": "tools/search.js",
+      "callable": "search",
+      "args": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "description": "arXiv query, such as \"all:transformer\" or plain words."
+        },
+        "maxResults": {
+          "type": "integer",
+          "required": false,
+          "description": "Most papers to return (1-100, default 10)."
+        }
+      },
+      "returns": {
+        "type": "array",
+        "description": "Array of { id, title, authors, summary, published, absUrl, pdfUrl }."
+      }
+    }
+  }
+}

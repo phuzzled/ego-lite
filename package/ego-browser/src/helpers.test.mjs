@@ -1458,3 +1458,161 @@ test("waitForAgentControl propagates non-user-control snapshot errors", async ()
     },
   );
 });
+
+function ttlEgo(calls, capabilities) {
+  return {
+    ...(capabilities ? { getHostCapabilities: () => capabilities } : {}),
+    async listTaskSpaces() {
+      return { taskSpaces: [] };
+    },
+    async createTaskSpace(...args) {
+      calls.push(["createTaskSpace", ...args]);
+      return { taskId: args[0], id: 9, name: args[0] };
+    },
+    useTaskSpace(id) {
+      return id;
+    },
+    async listTabs() {
+      return { tabs: [{ targetId: "target-ttl" }] };
+    },
+  };
+}
+
+test("taskSpace passes ttlMs only to a host that supports a TTL", async () => {
+  const supported = [];
+  await withEgo(ttlEgo(supported, { taskSpaceTtl: true }), async () => {
+    await taskSpace("ttl space", { ttlMs: 60_000 });
+  });
+  assert.deepEqual(supported, [
+    ["createTaskSpace", "ttl space", undefined, { ttlMs: 60_000 }],
+  ]);
+
+  const unsupported = [];
+  await withEgo(ttlEgo(unsupported), async () => {
+    await taskSpace("ttl space", { ttlMs: 60_000 });
+  });
+  assert.deepEqual(
+    unsupported,
+    [["createTaskSpace", "ttl space"]],
+    "the app gets the old call shape",
+  );
+
+  await assert.rejects(
+    () => taskSpace("x", { ttlMs: 0 }),
+    /ttlMs must be a positive integer/,
+  );
+});
+
+test("taskSpace restorePages reopens lost Pages on a host that can", async () => {
+  const restored = [];
+  const ego = {
+    getHostCapabilities: () => ({ restoreTaskSpaceTabs: true }),
+    async listTaskSpaces() {
+      return {
+        taskSpaces: [
+          { taskId: "r", id: 11, name: "restore me", ownership: "agent" },
+        ],
+      };
+    },
+    useTaskSpace(id) {
+      return id;
+    },
+    async listTabs() {
+      return {
+        tabs: restored.map((targetId) => ({
+          targetId,
+          url: "https://example.test/a",
+        })),
+      };
+    },
+    async restoreTaskSpaceTabs() {
+      restored.push("target-restored");
+      return {
+        tabs: [{ targetId: "target-restored", url: "https://example.test/a" }],
+        skipped: [],
+      };
+    },
+  };
+  await withEgo(ego, async () => {
+    const task = await taskSpace("restore me", { restorePages: true });
+    const pages = await task.pages();
+    assert.deepEqual(
+      pages.map((page) => page.targetId),
+      ["target-restored"],
+    );
+  });
+  // Without the capability the option is a no-op.
+  await withEgo(
+    {
+      async listTaskSpaces() {
+        return {
+          taskSpaces: [
+            { taskId: "r", id: 12, name: "plain", ownership: "agent" },
+          ],
+        };
+      },
+      useTaskSpace(id) {
+        return id;
+      },
+      async listTabs() {
+        return { tabs: [] };
+      },
+    },
+    async () => {
+      const task = await taskSpace("plain", { restorePages: true });
+      assert.equal(task.spaceId, 12);
+    },
+  );
+});
+
+test("siteTools lists learned tools with how to call them", async (t) => {
+  const previous = process.env.EGO_BROWSER_AGENT_WORKSPACE;
+  process.env.EGO_BROWSER_AGENT_WORKSPACE = new URL(
+    "../../../skills/ego-browser",
+    import.meta.url,
+  ).pathname;
+  t.after(() => {
+    if (previous === undefined) delete process.env.EGO_BROWSER_AGENT_WORKSPACE;
+    else process.env.EGO_BROWSER_AGENT_WORKSPACE = previous;
+  });
+  const all = await helperExports.siteTools();
+  const bing = all.find(
+    (tool) => tool.site === "bing" && tool.name === "search",
+  );
+  assert(bing, "the bing search tool is listed");
+  assert.equal(bing.api, 2);
+  assert.match(bing.usage, /page\.site\("bing"\)\.run\("search"/);
+  const google = await helperExports.siteTools(
+    "https://www.google.com/search?q=x",
+  );
+  assert(google.every((tool) => tool.site === "google"));
+  const v1 = google.find((tool) => tool.kind === "node" && tool.api === 1);
+  assert(v1, "the v1 Google tool is listed");
+  assert.match(v1.usage, /runSiteTool/);
+  assert(
+    google.some((tool) => tool.name === "search" && tool.api === 2),
+    "the v2 Google tool is listed",
+  );
+  assert.equal(
+    (await helperExports.siteTools("wikipedia")).length,
+    2,
+    "a site id lists that site's tools",
+  );
+  assert.deepEqual(await helperExports.siteTools("no-such-site.invalid"), []);
+});
+
+test("readPdf reads a PDF on disk and needs an absolute path", async () => {
+  const { writeFile } = await import("node:fs/promises");
+  const { twoPagePdf } =
+    await import("../scripts/real-browser-e2e/extraction-fixture.mjs");
+  const path = join(stateDir, "report.pdf");
+  await writeFile(path, twoPagePdf());
+  const result = await helperExports.readPdf(path);
+  assert.equal(result.source, "pdf");
+  assert.equal(result.pages.length, 2);
+  assert.equal(result.title, "Fixture report");
+  await assert.rejects(
+    () => helperExports.readPdf("report.pdf"),
+    /absolute file path/,
+  );
+});

@@ -81,7 +81,10 @@ export async function loadLearnedContext(
         toolType: "node",
         description: schema.description || "",
         args: schema.args || {},
-        example: `await runSiteTool("${siteId}", "${toolName}", { ... })`,
+        example:
+          (schema as { api?: number }).api === 2
+            ? `await page.site("${siteId}").run("${toolName}", { ... })`
+            : `await runSiteTool("${siteId}", "${toolName}", { ... })`,
       });
     }
 

@@ -23,12 +23,19 @@ import {
   rollbackCreatedTaskSpace,
 } from "./page-model.js";
 import {
+  iterLearningDirs,
   loadBrowserToolSource,
   loadLearnedContext,
   runNodeSiteTool,
   siteSkillsForUrl as siteSkillsForUrlCore,
+  siteSkillsRoot,
   wrapBrowserTool,
 } from "./learning/index.js";
+import { readFile } from "node:fs/promises";
+import { isAbsolute } from "node:path";
+import { hostCapabilities } from "./host-capabilities.js";
+import { pdfReadResult, siteToolList } from "./page-model.js";
+import { DEFAULT_READ_MAX_CHARS } from "./extract/read.js";
 
 export { NAME } from "./state.js";
 export { cdp, js } from "./cdp-eval.js";
@@ -184,19 +191,27 @@ export async function newTaskSpace(name, profileId?: string) {
 async function createTaskSpaceResolution(
   name,
   profileId?: string,
-  options: { select?: boolean } = {},
+  options: { select?: boolean; ttlMs?: number } = {},
 ) {
   const ego = globalThis.ego;
   if (!ego || typeof ego.createTaskSpace !== "function") {
     throw new Error("newTaskSpace requires ego.createTaskSpace");
   }
+  // A TTL goes only to a host that says it supports one; other hosts keep
+  // spaces until they are finished, as before.
+  const ttlMs =
+    options.ttlMs !== undefined && hostCapabilities(ego).taskSpaceTtl === true
+      ? options.ttlMs
+      : undefined;
   // Do not pass an explicit undefined: older native bindings reject extra
   // arguments, while newer builds accept profileId as the second argument.
   const created = normalizeTaskSpace(
     await invokeEgo("newTaskSpace", () =>
-      profileId === undefined
-        ? ego.createTaskSpace(name)
-        : ego.createTaskSpace(name, profileId),
+      ttlMs !== undefined
+        ? ego.createTaskSpace(name, profileId, { ttlMs })
+        : profileId === undefined
+          ? ego.createTaskSpace(name)
+          : ego.createTaskSpace(name, profileId),
     ),
   );
   if (!created) {
@@ -235,7 +250,12 @@ export async function useOrCreateTaskSpace(nameOrId) {
 
 async function resolveTaskSpace(
   nameOrId,
-  options: { select?: boolean; op?: string; afterNameRace?: boolean } = {},
+  options: {
+    select?: boolean;
+    op?: string;
+    afterNameRace?: boolean;
+    ttlMs?: number;
+  } = {},
 ) {
   const op = options.op ?? "useOrCreateTaskSpace";
   const spaces = await listTaskSpaces();
@@ -247,6 +267,7 @@ async function resolveTaskSpace(
     try {
       return await createTaskSpaceResolution(nameOrId, undefined, {
         select: options.select,
+        ttlMs: options.ttlMs,
       });
     } catch (error) {
       // Another agent created the same name between the list and the create.
@@ -315,19 +336,41 @@ async function resolveTaskSpace(
  * Return the v2 object handle for an existing task space, or create the space
  * when a string name does not exist.
  * @param {string|number} nameOrId Task space name or numeric id.
- * @param {{profileId?:string}} [options] Creation options for a new named space.
+ * @param {{profileId?:string, ttlMs?:number, restorePages?:boolean}} [options] Creation options for a new named space.
  * @returns {Promise<import('./page-model.js').TaskSpace>}
  */
 export async function taskSpace(
   nameOrId,
-  options: { profileId?: string } = {},
+  options: { profileId?: string; ttlMs?: number; restorePages?: boolean } = {},
 ) {
   assertTaskSpaceLocator("taskSpace", nameOrId);
   validatePublicApiOptions("taskSpace", options);
-  const { profileId } = options;
+  const task = await resolveTaskSpaceHandle(nameOrId, options);
+  if (options.restorePages === true) {
+    const ego = globalThis.ego;
+    const caps = hostCapabilities(ego);
+    if (
+      caps.restoreTaskSpaceTabs === true &&
+      typeof ego?.restoreTaskSpaceTabs === "function"
+    ) {
+      await task.restorePages();
+    }
+  }
+  return task;
+}
+
+async function resolveTaskSpaceHandle(
+  nameOrId,
+  options: { profileId?: string; ttlMs?: number },
+) {
+  const { profileId, ttlMs } = options;
   if (profileId === undefined) {
     return initializeResolvedTaskSpace(
-      await resolveTaskSpace(nameOrId, { select: false, op: "taskSpace" }),
+      await resolveTaskSpace(nameOrId, {
+        select: false,
+        op: "taskSpace",
+        ttlMs,
+      }),
     );
   }
   if (typeof nameOrId !== "string") {
@@ -342,7 +385,10 @@ export async function taskSpace(
     );
   }
   return initializeResolvedTaskSpace(
-    await createTaskSpaceResolution(nameOrId, profileId, { select: false }),
+    await createTaskSpaceResolution(nameOrId, profileId, {
+      select: false,
+      ttlMs,
+    }),
   );
 }
 
@@ -705,6 +751,73 @@ export async function learnContext(url = undefined) {
   });
 }
 
+/**
+ * List learned site tools for a URL or domain, for one site id, or for every
+ * site when called without an argument.
+ * @param {string} [urlOrSiteId] URL, domain, or site id.
+ * @returns {Promise<Array<{site:string,name:string,kind:string,api:number,description:string,args:object,usage:string}>>}
+ */
+export async function siteTools(urlOrSiteId = undefined) {
+  const workspace = state.agentWorkspace();
+  const manifests: any[] = [];
+  const all: any[] = [];
+  for (const dir of await iterLearningDirs(siteSkillsRoot(workspace))) {
+    try {
+      all.push(JSON.parse(await readFile(`${dir}/manifest.json`, "utf8")));
+    } catch {
+      // validate:site-skills reports broken manifests.
+    }
+  }
+  if (urlOrSiteId === undefined) {
+    manifests.push(...all);
+  } else if (typeof urlOrSiteId !== "string" || !urlOrSiteId) {
+    throw new TypeError(
+      "siteTools(urlOrSiteId) takes a URL, domain, or site id",
+    );
+  } else {
+    const byId = all.find((manifest) => manifest.id === urlOrSiteId);
+    if (byId) manifests.push(byId);
+    else {
+      const matches = await siteSkillsForUrlCore(urlOrSiteId, {
+        agentWorkspace: workspace,
+      });
+      for (const match of matches) {
+        const manifest = all.find((candidate) => candidate.id === match.id);
+        if (manifest) manifests.push(manifest);
+      }
+    }
+  }
+  return manifests.flatMap((manifest) =>
+    siteToolList(manifest).map((tool) => ({
+      site: manifest.id,
+      ...tool,
+      usage:
+        tool.kind === "node" && tool.api !== 2
+          ? `await runSiteTool(${JSON.stringify(manifest.id)}, ${JSON.stringify(tool.name)}, { ... }) // v1 only`
+          : `await page.site(${JSON.stringify(manifest.id)}).run(${JSON.stringify(tool.name)}, { ... })`,
+    })),
+  );
+}
+
+/**
+ * Read the text of a PDF file on disk, page by page.
+ * @param {string} path Absolute path of the PDF.
+ * @param {{maxChars?:number}} [options]
+ * @returns {Promise<object>} { url, title, markdown, pages, words, truncated, source: "pdf" }
+ */
+export async function readPdf(path, options: { maxChars?: number } = {}) {
+  if (typeof path !== "string" || !isAbsolute(path)) {
+    throw new TypeError("readPdf(path) requires an absolute file path");
+  }
+  validatePublicApiOptions("readPdf", options);
+  const bytes = await readFile(path);
+  return pdfReadResult(
+    bytes,
+    `file://${path}`,
+    options.maxChars ?? DEFAULT_READ_MAX_CHARS,
+  );
+}
+
 export function helperContext(
   extra: any = {},
   {
@@ -728,6 +841,8 @@ export function helperContext(
     runSiteTool,
     runSiteBrowserTool,
     learnContext,
+    siteTools,
+    readPdf,
     profiles,
     listTaskSpaces,
     switchTaskSpace,

@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
 import {
@@ -142,6 +142,64 @@ import {
 } from "./public-api-schema.js";
 import { parseRef, type RefMap } from "./ref-map.js";
 import { state } from "./state.js";
+import { bufferOutput } from "./output-sink.js";
+import {
+  hostCapabilities as readHostCapabilities,
+  unsupportedOnHost,
+  type HostCapabilities,
+} from "./host-capabilities.js";
+import { evaluateIsolated } from "./extract/isolated.js";
+import {
+  DEFAULT_READ_MAX_CHARS,
+  countWords,
+  detectPdfDocument,
+  extractReadable,
+  finishReadResult,
+  truncateMarkdown,
+  type RawReadResult,
+  type ReadResult,
+} from "./extract/read.js";
+import { extractPdfText, pdfMarkdown } from "./extract/pdf.js";
+import {
+  extractTables,
+  gridToRows,
+  tableToCsv,
+  type ExtractedTable,
+} from "./extract/tables.js";
+import {
+  extractStructuredData,
+  type StructuredData,
+} from "./extract/structured.js";
+import {
+  judgeSearchPage,
+  parseSearchPage,
+  searchEngineOrder,
+  searchUrl,
+  BLOCK_HINT,
+  type ParsedSearchPage,
+  type SearchBlock,
+  type SearchEngine,
+  type SearchResult,
+} from "./extract/search.js";
+import {
+  ACCEPT_TEXT,
+  CONSENT_RULES,
+  REJECT_TEXT,
+  consentStillVisible,
+  dismissConsentInFrame,
+  type ConsentResult,
+} from "./extract/consent.js";
+import {
+  findSiteSkill,
+  loadBrowserToolSource,
+  wrapBrowserTool,
+} from "./learning/index.js";
+import { pathToFileURL } from "node:url";
+import {
+  isAbsolute as isAbsolutePath,
+  relative,
+  resolve as resolvePath,
+} from "node:path";
 
 type TaskSpaceDescriptor = {
   taskId?: string | number;
@@ -228,7 +286,70 @@ export type PageSnapshotObject = {
 type PageScreenshotOptions = Omit<CaptureScreenshotOptions, "full"> & {
   path?: string;
   fullPage?: boolean;
+  maxHeight?: number;
+  tiles?: boolean;
 };
+
+type PageReadOptions = {
+  mode?: "article" | "full";
+  selector?: string;
+  maxChars?: number;
+  timeout?: number;
+};
+
+type PageTablesOptions = {
+  selector?: string;
+  index?: number;
+  saveAs?: string;
+  csv?: boolean;
+  includeHidden?: boolean;
+};
+
+type PageSearchOptions = {
+  engine?: SearchEngine | "auto";
+  max?: number;
+  timeout?: number;
+};
+
+type PageDismissConsentOptions = {
+  prefer?: "reject" | "accept";
+  timeout?: number;
+};
+
+type PageScrollToLoadOptions = {
+  itemSelector?: string;
+  maxItems?: number;
+  maxScrolls?: number;
+  idleMs?: number;
+  timeout?: number;
+};
+
+type PagePaginateOptions = {
+  next: string;
+  maxPages?: number;
+  timeout?: number;
+};
+
+type HandOffOptions = {
+  relay?: boolean;
+};
+
+type TaskMapOptions = {
+  concurrency?: number;
+  navigate?: boolean;
+  timeout?: number;
+  waitUntil?: PageGotoWaitUntil;
+};
+
+export type TaskMapResult<T> =
+  | { url: string; index: number; ok: true; value: T }
+  | {
+      url: string;
+      index: number;
+      ok: false;
+      error: string;
+      error_code?: string;
+    };
 
 type CdpOptions = {
   timeout?: number;
@@ -442,6 +563,19 @@ type PageModelServices = {
   sleep(ms: number): Promise<void>;
   platform: string;
   pageBudget: number;
+  /** Host extensions available now (each flag implies its binding exists). */
+  hostCapabilities(): HostCapabilities;
+  taskSpaceMemo(
+    key: string,
+    write?: { value: unknown },
+  ): Promise<{ found: boolean; value?: unknown }>;
+  restoreTaskSpaceTabs(): Promise<{
+    tabs: Array<{ targetId: string; url: string }>;
+    skipped: string[];
+  }>;
+  handOffRelay(): Promise<{ relay: Record<string, unknown> }>;
+  logEvent(entry: Record<string, unknown>): void;
+  agentWorkspace(): string;
 };
 
 export type TabInventoryItem = {
@@ -490,6 +624,12 @@ export class PageEvaluationTimeoutError extends Error {
 }
 
 const SNAPSHOT_ATTEMPTS = 3;
+/** Image tools reject very tall images; fullPage stops here by default. */
+const DEFAULT_FULL_PAGE_MAX_HEIGHT = 16_000;
+const DEFAULT_TILE_HEIGHT = 4_000;
+const MAX_TILES = 50;
+const MAX_PDF_BYTES = 50 * 1024 * 1024;
+const DEFAULT_CONSENT_WAIT_MS = 1_000;
 const PAGE_CLOSE_CONFIRM_TIMEOUT_MS = 2_000;
 const PAGE_CLOSE_CONFIRM_INTERVAL_MS = 50;
 const CREATED_SPACE_TAB_TIMEOUT_MS = 2_000;
@@ -719,6 +859,13 @@ const initializeTaskSpaceToken = Symbol("initializeTaskSpace");
 const initializeCreatedSpaceToken = Symbol("initializeCreatedSpace");
 const rollbackCreatedTaskSpaceToken = Symbol("rollbackCreatedTaskSpace");
 const describeMissingPageToken = Symbol("describeMissingPage");
+/** Each Page's services, for the round-log wrapper below the class. */
+const pageServices = new WeakMap<object, PageModelServices>();
+const recordPageUrlToken = Symbol("recordPageUrl");
+/** Memo key under which the SDK keeps each Page label's last URL. */
+const PAGE_URLS_MEMO_KEY = "__ego.pageUrls";
+const RESERVED_MEMO_PREFIX = "__ego.";
+const DEFAULT_MAP_CONCURRENCY = 3;
 
 const defaultGate: OperationGate = {
   withSpace: defaultWithSpace,
@@ -838,6 +985,54 @@ const baseDefaultServices: Omit<PageModelServices, "ledger" | "pageBudget"> = {
   get platform() {
     return state.platform;
   },
+  hostCapabilities() {
+    const ego = (globalThis as any).ego;
+    const caps = readHostCapabilities(ego);
+    const has = (name: string) => typeof ego?.[name] === "function";
+    return {
+      ...caps,
+      taskSpaceTtl: caps.taskSpaceTtl === true && has("createTaskSpace"),
+      taskSpaceMemo: caps.taskSpaceMemo === true && has("taskSpaceMemo"),
+      restoreTaskSpaceTabs:
+        caps.restoreTaskSpaceTabs === true && has("restoreTaskSpaceTabs"),
+      handOffRelay: caps.handOffRelay === true && has("handOffTaskSpace"),
+      logEvent: caps.logEvent === true && has("logEvent"),
+    };
+  },
+  async taskSpaceMemo(key, write) {
+    const ego = browserEgo();
+    return invokeEgo("task.memo", () =>
+      write ? ego.taskSpaceMemo(key, write.value) : ego.taskSpaceMemo(key),
+    );
+  },
+  async restoreTaskSpaceTabs() {
+    const ego = browserEgo();
+    const result = await invokeEgo("task.restorePages", () =>
+      ego.restoreTaskSpaceTabs(),
+    );
+    return {
+      tabs: Array.isArray(result?.tabs) ? result.tabs : [],
+      skipped: Array.isArray(result?.skipped) ? result.skipped : [],
+    };
+  },
+  async handOffRelay() {
+    const ego = browserEgo();
+    return invokeEgo("task.handOff", () =>
+      ego.handOffTaskSpace({ relay: true }),
+    );
+  },
+  logEvent(entry) {
+    try {
+      const result = browserEgo().logEvent(entry);
+      // An async binding must not leave an unhandled rejection behind.
+      if (result && typeof result.then === "function") {
+        result.then(undefined, () => {});
+      }
+    } catch {
+      // The round log is an aid; never fail an action over it.
+    }
+  },
+  agentWorkspace: () => state.agentWorkspace(),
 };
 
 /**
@@ -1075,8 +1270,27 @@ class TaskSpace {
     }
   }
 
-  /** Give control of this task space to the user while keeping Page state. */
-  async handOff(): Promise<void> {
+  /**
+   * Give control of this task space to the user while keeping Page state.
+   * With { relay: true } (hosts that support it), keep control instead and
+   * return a screenshot and snapshot of the page to show the user.
+   */
+  async handOff(
+    options: HandOffOptions = {},
+  ): Promise<void | { relay: Record<string, unknown> }> {
+    validatePublicApiOptions("TaskSpace.handOff", options);
+    if (options.relay === true) {
+      if (!this.#services.hostCapabilities().handOffRelay) {
+        throw unsupportedOnHost(
+          "task.handOff({ relay: true })",
+          "use task.handOff() to give the user control, or take a screenshot with page.screenshot()",
+        );
+      }
+      return this.#services.gate.withSpace(this.spaceId, async () => {
+        const result = await this.#services.handOffRelay();
+        return { relay: result?.relay ?? {} };
+      });
+    }
     await this.#services.gate.withSpace(this.spaceId, async () => {
       await this.#reconcilePages();
       await this.#services.ledger.beginUserControl(this.spaceId);
@@ -1354,6 +1568,252 @@ class TaskSpace {
     });
   }
 
+  /**
+   * A small JSON store kept with this task space by the host, so a re-run
+   * can skip finished steps. memo(key) resolves the value or undefined;
+   * memo(key, value) stores it; memo(key, null) deletes it. finish() clears it.
+   */
+  async memo(key: string, ...rest: unknown[]): Promise<unknown> {
+    if (typeof key !== "string" || key.length === 0) {
+      throw new TypeError("task.memo(key) requires a non-empty string key");
+    }
+    if (rest.length > 1) {
+      throw new TypeError(
+        "task.memo accepts (key) to read or (key, value) to write",
+      );
+    }
+    if (key.startsWith(RESERVED_MEMO_PREFIX)) {
+      throw new TypeError(
+        `task.memo keys starting with ${JSON.stringify(RESERVED_MEMO_PREFIX)} are reserved for the SDK`,
+      );
+    }
+    const write = rest.length === 1;
+    if (write) {
+      const value = rest[0];
+      let json: string | undefined;
+      try {
+        json = JSON.stringify(value);
+      } catch {
+        json = undefined;
+      }
+      if (json === undefined) {
+        throw new TypeError(
+          "task.memo value must be JSON-serializable; use null to delete",
+        );
+      }
+    }
+    if (!this.#services.hostCapabilities().taskSpaceMemo) {
+      throw unsupportedOnHost(
+        "task.memo",
+        "keep progress in a file of your own instead",
+      );
+    }
+    return this.#services.gate.withSpace(this.id, async () => {
+      if (write) {
+        await this.#services.taskSpaceMemo(key, { value: rest[0] });
+        return rest[0] === null ? undefined : rest[0];
+      }
+      const result = await this.#services.taskSpaceMemo(key);
+      return result?.found ? result.value : undefined;
+    });
+  }
+
+  /**
+   * After a browser restart, reopen the tabs this space lost (http(s) GET
+   * only; form state is lost) and give them back their Page labels.
+   */
+  async restorePages(): Promise<{
+    pages: Array<{ label: string; url: string }>;
+    skipped: string[];
+  }> {
+    const capabilities = this.#services.hostCapabilities();
+    if (!capabilities.restoreTaskSpaceTabs) {
+      throw unsupportedOnHost(
+        "task.restorePages",
+        "open the Pages again with await task.newPage() and page.goto(url)",
+      );
+    }
+    return this.#services.gate.withSpace(this.id, async () => {
+      const saved = capabilities.taskSpaceMemo
+        ? await this.#readPageUrls()
+        : {};
+      const result = await this.#services.restoreTaskSpaceTabs();
+      const ledger = await this.#services.ledger.read(this.id);
+      const taken = new Set([
+        ...(ledger.usedLabels || []),
+        ...Object.keys(ledger.pages),
+      ]);
+      const pages: Array<{ label: string; url: string }> = [];
+      let lastTarget: string | undefined;
+      for (const tab of result.tabs) {
+        const label = Object.keys(saved).find(
+          (candidate) => saved[candidate] === tab.url && !taken.has(candidate),
+        );
+        const entry = await this.#services.ledger.addPage(
+          this.id,
+          tab.targetId,
+          { ...(label ? { as: label } : {}), openedBy: "agent" },
+        );
+        taken.add(entry.label);
+        pages.push({ label: entry.label, url: tab.url });
+        lastTarget = tab.targetId;
+      }
+      if (lastTarget) this.#services.setPreferredTarget(lastTarget);
+      if (pages.length > 0) {
+        bufferOutput(
+          `[ego-browser] browser restarted; reopened ${pages
+            .map((page) => `${page.label} at ${page.url}`)
+            .join(", ")} (form state is lost)\n`,
+        );
+        if (capabilities.taskSpaceMemo) {
+          await this.#savePageUrls(
+            Object.fromEntries(pages.map((page) => [page.label, page.url])),
+          );
+        }
+      }
+      return { pages, skipped: result.skipped };
+    });
+  }
+
+  /**
+   * Run fn(page, url, index) for each URL on up to `concurrency` Pages that
+   * are reused and closed afterwards. Each Page goes to its URL first unless
+   * navigate is false. One failure does not stop the others.
+   */
+  async map<T>(
+    urls: string[],
+    fn: (page: Page, url: string, index: number) => T | Promise<T>,
+    options: TaskMapOptions = {},
+  ): Promise<Array<TaskMapResult<Awaited<T>>>> {
+    if (!Array.isArray(urls) || urls.some((url) => typeof url !== "string")) {
+      throw new TypeError(
+        "task.map(urls, fn) requires an array of URL strings",
+      );
+    }
+    if (typeof fn !== "function") {
+      throw new TypeError(
+        "task.map(urls, fn) requires fn(page, url, index) to be a function",
+      );
+    }
+    validatePublicApiOptions("TaskSpace.map", options);
+    const results: Array<TaskMapResult<Awaited<T>>> = new Array(urls.length);
+    if (urls.length === 0) return results;
+    const managed = (await this.pages()).length;
+    const room = Math.max(1, this.#services.pageBudget - managed);
+    const workers = Math.min(
+      options.concurrency ?? DEFAULT_MAP_CONCURRENCY,
+      urls.length,
+      room,
+    );
+    const pages: Page[] = [];
+    let next = 0;
+    try {
+      for (let i = 0; i < workers; i += 1) pages.push(await this.newPage());
+      await Promise.all(
+        pages.map(async (page) => {
+          while (next < urls.length) {
+            const index = next;
+            next += 1;
+            const url = urls[index];
+            try {
+              if (options.navigate !== false) {
+                await page.goto(url, {
+                  ...(options.timeout === undefined
+                    ? {}
+                    : { timeout: options.timeout }),
+                  ...(options.waitUntil === undefined
+                    ? {}
+                    : { waitUntil: options.waitUntil }),
+                });
+              }
+              const value = await fn(page, url, index);
+              results[index] = { url, index, ok: true, value };
+            } catch (error) {
+              const code = (error as { error_code?: unknown })?.error_code;
+              results[index] = {
+                url,
+                index,
+                ok: false,
+                error: (error as Error)?.message || String(error),
+                ...(typeof code === "string" ? { error_code: code } : {}),
+              };
+            }
+          }
+        }),
+      );
+    } finally {
+      for (const page of pages) {
+        await page.close().catch(() => {});
+      }
+    }
+    return results;
+  }
+
+  /** Remember a Page label's URL so restorePages() can relabel it. */
+  async [recordPageUrlToken](label: string, url: string): Promise<void> {
+    if (!/^https?:\/\//i.test(url)) return;
+    if (!this.#services.hostCapabilities().taskSpaceMemo) return;
+    try {
+      await this.#services.gate.withSpace(this.id, async () => {
+        const saved = await this.#readPageUrls();
+        if (saved[label] === url) return;
+        await this.#savePageUrls({ ...saved, [label]: url });
+      });
+    } catch {
+      // Restore metadata is best effort.
+    }
+  }
+
+  #pageUrls?: Record<string, string>;
+
+  async #readPageUrls(): Promise<Record<string, string>> {
+    if (this.#pageUrls) return this.#pageUrls;
+    try {
+      const result = await this.#services.taskSpaceMemo(PAGE_URLS_MEMO_KEY);
+      const value = result?.found ? result.value : undefined;
+      this.#pageUrls =
+        value && typeof value === "object" && !Array.isArray(value)
+          ? (value as Record<string, string>)
+          : {};
+    } catch {
+      this.#pageUrls = {};
+    }
+    return this.#pageUrls;
+  }
+
+  async #savePageUrls(next: Record<string, string>): Promise<void> {
+    const before = await this.#readPageUrls();
+    const merged = { ...before, ...next };
+    if (JSON.stringify(merged) === JSON.stringify(before)) return;
+    await this.#services.taskSpaceMemo(PAGE_URLS_MEMO_KEY, { value: merged });
+    this.#pageUrls = merged;
+  }
+
+  /** Keep the label-to-URL record in step with the live tabs. */
+  async #recordLiveUrls(ledger: PageLedger, tabs: RuntimeTab[]): Promise<void> {
+    if (tabs.length === 0) return;
+    if (!this.#services.hostCapabilities().taskSpaceMemo) return;
+    const live: Record<string, string> = {};
+    for (const [label, page] of Object.entries(ledger.pages)) {
+      const url = tabs.find((tab) => tab.targetId === page.targetId)?.url;
+      if (url && /^https?:\/\//i.test(url)) live[label] = url;
+    }
+    try {
+      const before = await this.#readPageUrls();
+      // Drop labels the ledger no longer has; keep the rest current.
+      const next: Record<string, string> = {};
+      for (const label of Object.keys(ledger.pages)) {
+        if (live[label]) next[label] = live[label];
+        else if (before[label]) next[label] = before[label];
+      }
+      if (JSON.stringify(next) === JSON.stringify(before)) return;
+      await this.#services.taskSpaceMemo(PAGE_URLS_MEMO_KEY, { value: next });
+      this.#pageUrls = next;
+    } catch {
+      // Restore metadata is best effort.
+    }
+  }
+
   async #reconcilePages(): Promise<{
     ledger: PageLedger;
     tabs: RuntimeTab[];
@@ -1387,6 +1847,7 @@ class TaskSpace {
         );
       }
     }
+    await this.#recordLiveUrls(ledger, tabs);
     return { ledger, tabs };
   }
 
@@ -1698,6 +2159,7 @@ class Page {
     this.#task = task;
     this.#spaceName = task.name;
     this.#services = services;
+    pageServices.set(this, services);
     this.#targetId = entry?.targetId;
     this.#openedBy = entry?.openedBy;
     this.keyboard = new PageKeyboard(
@@ -1747,6 +2209,7 @@ class Page {
         });
       },
     );
+    await this.#task[recordPageUrlToken](this.label, url);
     return receipt;
   }
 
@@ -2055,20 +2518,27 @@ class Page {
       this.#services,
       sessionId,
       options,
-      async (selector) => {
-        const refMap = await this.#refMapForAction(page, sessionId, selector);
-        const iframeSessions = await this.#services.ensureFrameSessions(
-          page.targetId,
-        );
-        return countSelectorMatchesInPage(
-          this.#services,
-          sessionId,
-          refMap,
-          selector,
-          iframeSessions,
-        );
-      },
+      (selector) => this.#countMatches(page, sessionId, selector),
       () => this.#services.pageNetworkSessions(sessionId),
+    );
+  }
+
+  /** How many elements a selector, loc= locator or ref matches now. */
+  async #countMatches(
+    page: PageTarget,
+    sessionId: string,
+    selector: string,
+  ): Promise<number> {
+    const refMap = await this.#refMapForAction(page, sessionId, selector);
+    const iframeSessions = await this.#services.ensureFrameSessions(
+      page.targetId,
+    );
+    return countSelectorMatchesInPage(
+      this.#services,
+      sessionId,
+      refMap,
+      selector,
+      iframeSessions,
     );
   }
 
@@ -2098,6 +2568,493 @@ class Page {
     }
     const stats = snapshotStats(state, refs, pendingRequests);
     return { stats, warnings: snapshotWarnings(stats, state) };
+  }
+
+  /**
+   * The readable content of this Page as Markdown: the main article by
+   * default, the whole body with mode "full", or one element with selector.
+   * A PDF (opened in the viewer or at a .pdf URL) is read as text by page.
+   */
+  async read(options: PageReadOptions = {}): Promise<ReadResult> {
+    validatePublicApiOptions("Page.read", options);
+    if (options.mode !== undefined && options.selector !== undefined) {
+      throw new TypeError("page.read takes mode or selector, not both");
+    }
+    const maxChars = options.maxChars ?? DEFAULT_READ_MAX_CHARS;
+    const timeoutMs = options.timeout ?? 20_000;
+    const page = await this.#resolve();
+    return this.#services.gate.withPage(page, async ({ sessionId }) => {
+      if (options.selector === undefined) {
+        const pdf = await evaluateIsolated<{ pdf: boolean; url: string }>(
+          this.#services,
+          sessionId,
+          detectPdfDocument,
+          null,
+          5_000,
+        ).catch(() => undefined);
+        if (pdf?.pdf) return this.#readPdf(sessionId, pdf.url, maxChars);
+      }
+      const raw = await evaluateIsolated<RawReadResult>(
+        this.#services,
+        sessionId,
+        extractReadable,
+        { mode: options.mode, selector: options.selector },
+        timeoutMs,
+      );
+      if (!raw || typeof raw !== "object") {
+        throw new Error("page.read got no result from the page");
+      }
+      if ("error" in raw && raw.error) {
+        throw attachHint(
+          new Error(`page.read: ${raw.error}`),
+          "Check the selector with a snapshot, or call page.read() without one.",
+        );
+      }
+      const result = finishReadResult(
+        raw as Exclude<RawReadResult, { error: string }>,
+        maxChars,
+      );
+      if (result.words < 30) {
+        result.warning =
+          "the page has very little readable text: it may still be rendering, need a login, or keep its content in a frame. Wait (page.waitForSettled), then read again, or take a snapshot.";
+      }
+      return result;
+    });
+  }
+
+  async #readPdf(
+    sessionId: string,
+    url: string,
+    maxChars: number,
+  ): Promise<ReadResult> {
+    const response = await evaluateInSession<PageFetchResult>(
+      this.#services,
+      sessionId,
+      fetchInPage,
+      true,
+      { url, options: {}, timeoutMs: 30_000, responseType: "base64" },
+      31_000,
+    );
+    if ("fetchError" in response) {
+      throw attachHint(
+        new Error(
+          `page.read could not download the PDF: ${response.fetchError}`,
+        ),
+        'Download it with page.waitForEvent("download") or page.fetch(url, { saveAs }), then call readPdf(path).',
+      );
+    }
+    if (!response.ok) {
+      throw attachHint(
+        Object.assign(
+          new Error(`page.read: the PDF answered HTTP ${response.status}`),
+          { status: response.status },
+        ),
+        "Check the URL, or whether the PDF needs a login.",
+      );
+    }
+    const bytes = Buffer.from(response.bodyBase64 || "", "base64");
+    if (bytes.length > MAX_PDF_BYTES) {
+      throw new Error(
+        `page.read: the PDF is ${bytes.length} bytes, over the ${MAX_PDF_BYTES}-byte limit`,
+      );
+    }
+    return pdfReadResult(bytes, response.url || url, maxChars);
+  }
+
+  /**
+   * Tables on this Page (HTML tables and ARIA grids) as headers and rows
+   * keyed by header. rowspan/colspan are expanded; spacer rows dropped.
+   */
+  async tables(options: PageTablesOptions = {}): Promise<ExtractedTable[]> {
+    validatePublicApiOptions("Page.tables", options);
+    if (
+      options.index !== undefined &&
+      !(Number.isInteger(options.index) && options.index >= 0)
+    ) {
+      throw new TypeError("page.tables index must be a non-negative integer");
+    }
+    if (options.saveAs !== undefined) {
+      assertAbsoluteFilePath(options.saveAs, "page.tables saveAs");
+    }
+    const page = await this.#resolve();
+    const raw = await this.#services.gate.withPage(page, ({ sessionId }) =>
+      evaluateIsolated<any>(
+        this.#services,
+        sessionId,
+        extractTables,
+        { selector: options.selector, includeHidden: options.includeHidden },
+        20_000,
+      ),
+    );
+    if (raw?.error) {
+      throw attachHint(
+        new Error(`page.tables: ${raw.error}`),
+        "Pass a CSS selector of a table or of an element that contains tables.",
+      );
+    }
+    let tables: ExtractedTable[] = (raw?.tables || []).map(
+      (table: any, index: number) => {
+        const { headers, rows } = gridToRows(table.grid, table.headerRows);
+        return {
+          index,
+          ...(table.caption ? { caption: table.caption } : {}),
+          selector: table.selector,
+          kind: table.kind,
+          headers,
+          rows,
+          rowCount: rows.length,
+        };
+      },
+    );
+    if (options.index !== undefined) {
+      const table = tables[options.index];
+      if (!table) {
+        throw attachHint(
+          new Error(
+            `page.tables index ${options.index} is out of range: found ${tables.length} table${tables.length === 1 ? "" : "s"}`,
+          ),
+          "Call await page.tables() without index to list them.",
+        );
+      }
+      tables = [table];
+    }
+    if (options.csv || options.saveAs !== undefined) {
+      for (const table of tables) table.csv = tableToCsv(table);
+    }
+    if (options.saveAs !== undefined) {
+      if (tables.length !== 1) {
+        throw new TypeError(
+          `page.tables saveAs writes one table, but ${tables.length} matched; pass index`,
+        );
+      }
+      await mkdir(dirname(options.saveAs), { recursive: true });
+      await writeFile(options.saveAs, tables[0].csv!, "utf8");
+    }
+    return tables;
+  }
+
+  /** JSON-LD, OpenGraph, Twitter cards, description, canonical, microdata. */
+  async structuredData(): Promise<StructuredData> {
+    const page = await this.#resolve();
+    return this.#services.gate.withPage(page, ({ sessionId }) =>
+      evaluateIsolated<StructuredData>(
+        this.#services,
+        sessionId,
+        extractStructuredData,
+        null,
+        15_000,
+      ),
+    );
+  }
+
+  /**
+   * Search the web in this Page and read the results. Reports engines that
+   * show a bot check in `blocked` instead of returning empty results.
+   */
+  async search(
+    query: string,
+    options: PageSearchOptions = {},
+  ): Promise<SearchResult> {
+    if (typeof query !== "string" || !query.trim()) {
+      throw new TypeError("page.search(query) requires a non-empty query");
+    }
+    validatePublicApiOptions("Page.search", options);
+    const max = Math.min(options.max ?? 10, 50);
+    const blocked: SearchBlock[] = [];
+    for (const engine of searchEngineOrder(options.engine)) {
+      const url = searchUrl(engine, query.trim());
+      try {
+        await this.goto(url, {
+          timeout: options.timeout ?? 15_000,
+          waitUntil: "load",
+        });
+      } catch (error) {
+        blocked.push({
+          engine,
+          url,
+          reason: `the results page did not load: ${(error as Error)?.message || error}`,
+          hint: BLOCK_HINT,
+        });
+        continue;
+      }
+      const page = await this.#resolve();
+      const parsed = await this.#services.gate.withPage(page, ({ sessionId }) =>
+        evaluateIsolated<ParsedSearchPage>(
+          this.#services,
+          sessionId,
+          parseSearchPage,
+          { engine, max },
+          10_000,
+        ),
+      );
+      const verdict = judgeSearchPage(engine, {
+        url: parsed?.url || url,
+        results: Array.isArray(parsed?.results) ? parsed.results : [],
+        ...(parsed?.blocked ? { blocked: parsed.blocked } : {}),
+        ...(parsed?.noResults ? { noResults: true } : {}),
+      });
+      if (verdict.ok === true) {
+        return {
+          engine,
+          query,
+          url: parsed?.url || url,
+          results: verdict.results,
+          blocked,
+          ...(verdict.noResults ? { noResults: true } : {}),
+        };
+      }
+      blocked.push(verdict.block);
+    }
+    return { engine: null, query, results: [], blocked };
+  }
+
+  /**
+   * Close a cookie or consent banner. By default it picks "Reject all" or
+   * "Necessary only" and never accepts unless prefer is "accept".
+   */
+  async dismissConsent(
+    options: PageDismissConsentOptions = {},
+  ): Promise<ConsentResult> {
+    validatePublicApiOptions("Page.dismissConsent", options);
+    const prefer = options.prefer ?? "reject";
+    const waitMs = options.timeout ?? DEFAULT_CONSENT_WAIT_MS;
+    const deadline = this.#services.now() + waitMs;
+    const argument = {
+      prefer,
+      rules: CONSENT_RULES,
+      rejectText: REJECT_TEXT.source,
+      acceptText: ACCEPT_TEXT.source,
+      generic: true,
+    };
+    const page = await this.#resolve();
+    let settingsOpened = 0;
+    let last: ConsentResult = { found: false, action: "none" };
+    while (true) {
+      const attempt = await this.#services.gate.withPage(
+        page,
+        async ({ sessionId }) => {
+          const sessions: Array<[string, "main" | "iframe"]> = [
+            [sessionId, "main"],
+          ];
+          try {
+            const frames = await this.#services.ensureFrameSessions(
+              page.targetId,
+            );
+            for (const frameSession of frames.values()) {
+              if (frameSession !== sessionId) {
+                sessions.push([frameSession, "iframe"]);
+              }
+            }
+          } catch {
+            // Out-of-process frames are optional; the main frame still runs.
+          }
+          let found: (ConsentResult & { retry?: boolean }) | undefined;
+          for (const [frameSession, frame] of sessions) {
+            const result = await evaluateIsolated<
+              ConsentResult & { retry?: boolean }
+            >(
+              this.#services,
+              frameSession,
+              dismissConsentInFrame,
+              argument,
+              5_000,
+            ).catch(() => undefined);
+            if (!result?.found) continue;
+            found = { ...result, frame };
+            if (result.action !== "none" || result.retry) break;
+          }
+          return found;
+        },
+      );
+      if (attempt) {
+        last = attempt;
+        if (attempt.retry && settingsOpened < 2) {
+          // A settings panel opened; look for its reject button next.
+          settingsOpened += 1;
+          await this.#services.sleep(600);
+          continue;
+        }
+        const { retry: _retry, ...result } = attempt;
+        if (result.action === "none") return result;
+        await this.#services.sleep(500);
+        const rule = CONSENT_RULES.find(
+          (candidate) => candidate.framework === result.framework,
+        );
+        if (rule && result.frame === "main") {
+          const visible = await this.#services.gate.withPage(
+            page,
+            ({ sessionId }) =>
+              evaluateIsolated<boolean>(
+                this.#services,
+                sessionId,
+                consentStillVisible,
+                { container: rule.container },
+                5_000,
+              ).catch(() => undefined),
+          );
+          if (typeof visible === "boolean") result.dismissed = !visible;
+        }
+        return result;
+      }
+      const remaining = deadline - this.#services.now();
+      if (remaining <= 0) return last;
+      await this.#services.sleep(Math.min(250, remaining));
+    }
+  }
+
+  /**
+   * Scroll an infinite list until it stops growing: until maxItems items
+   * match itemSelector, no new items appear for idleMs, maxScrolls is
+   * reached, or the timeout passes.
+   */
+  async scrollToLoad(options: PageScrollToLoadOptions = {}): Promise<{
+    items?: number;
+    scrolls: number;
+    height: number;
+    stoppedBecause: string;
+    ms: number;
+  }> {
+    validatePublicApiOptions("Page.scrollToLoad", options);
+    const maxScrolls = options.maxScrolls ?? 30;
+    const idleMs = options.idleMs ?? 1_500;
+    const timeoutMs = options.timeout ?? 60_000;
+    const started = this.#services.now();
+    const deadline = started + timeoutMs;
+    const page = await this.#resolve();
+    const measure = () =>
+      this.#services.gate.withPage(page, async ({ sessionId }) => {
+        const height = await evaluateInSession<number>(
+          this.#services,
+          sessionId,
+          "Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0)",
+          false,
+        );
+        const items =
+          options.itemSelector === undefined
+            ? undefined
+            : await this.#countMatches(page, sessionId, options.itemSelector);
+        return { height: Number(height) || 0, items };
+      });
+    let state = await measure();
+    let scrolls = 0;
+    const done = (stoppedBecause: string) => ({
+      ...(state.items === undefined ? {} : { items: state.items }),
+      scrolls,
+      height: state.height,
+      stoppedBecause,
+      ms: this.#services.now() - started,
+    });
+    while (true) {
+      if (
+        options.maxItems !== undefined &&
+        state.items !== undefined &&
+        state.items >= options.maxItems
+      ) {
+        return done("maxItems reached");
+      }
+      if (scrolls >= maxScrolls) return done("maxScrolls reached");
+      if (this.#services.now() >= deadline) return done("timeout");
+      await this.#services.gate.withPage(page, async ({ sessionId }) => {
+        await this.#activate(page.targetId);
+        await evaluateInSession(this.#services, sessionId, scrollStep, true, {
+          itemSelector: cssOnly(options.itemSelector),
+        });
+      });
+      scrolls += 1;
+      // Wait for growth, up to idleMs.
+      const before = state;
+      const idleDeadline = Math.min(deadline, this.#services.now() + idleMs);
+      let grew = false;
+      while (this.#services.now() < idleDeadline) {
+        await this.#services.sleep(150);
+        state = await measure();
+        if (
+          (state.items !== undefined &&
+            before.items !== undefined &&
+            state.items > before.items) ||
+          state.height > before.height
+        ) {
+          grew = true;
+          break;
+        }
+      }
+      if (!grew) {
+        state = await measure();
+        return done(
+          state.items === undefined
+            ? "the page stopped growing"
+            : "no new items",
+        );
+      }
+    }
+  }
+
+  /**
+   * Visit this Page and each next page: yields this Page, then clicks
+   * `next`, waits for the page to change, and yields again, up to maxPages.
+   * Stops when `next` is missing or a click does not change the page.
+   */
+  async *paginate(options: PagePaginateOptions): AsyncGenerator<Page> {
+    if (!options || typeof options !== "object") {
+      throw new TypeError(
+        "page.paginate requires { next }, such as { next: \"loc=role:link[name='Next']\" }",
+      );
+    }
+    validatePublicApiOptions("Page.paginate", options);
+    if (typeof options.next !== "string" || !options.next) {
+      throw new TypeError("page.paginate requires a next selector");
+    }
+    const maxPages = options.maxPages ?? 10;
+    const timeoutMs = options.timeout ?? 15_000;
+    for (let n = 1; ; n += 1) {
+      yield this;
+      if (n >= maxPages) return;
+      const page = await this.#resolve();
+      const before = await this.#services.gate.withPage(
+        page,
+        async ({ sessionId }) => ({
+          count: await this.#countMatches(page, sessionId, options.next),
+          signature: await pageSignature(this.#services, sessionId),
+        }),
+      );
+      if (before.count === 0) return;
+      try {
+        await this.click(options.next, { timeout: Math.min(timeoutMs, 5_000) });
+      } catch (error) {
+        // A disabled or covered "next" means the last page.
+        if (error instanceof ElementResolutionError) return;
+        throw error;
+      }
+      const deadline = this.#services.now() + timeoutMs;
+      let changed = false;
+      while (this.#services.now() < deadline) {
+        await this.#services.sleep(200);
+        const after = await this.#services.gate
+          .withPage(await this.#resolve(), ({ sessionId }) =>
+            pageSignature(this.#services, sessionId),
+          )
+          .catch(() => undefined);
+        if (after && after !== before.signature) {
+          changed = true;
+          break;
+        }
+      }
+      if (!changed) return;
+      await this.waitForSettled({
+        timeout: Math.max(1, deadline - this.#services.now()),
+      });
+    }
+  }
+
+  /**
+   * A site's learned tools for use in this Page: site(id).tools() lists them
+   * and site(id).run(name, args) runs one with this Page.
+   */
+  site(siteId: string): SiteTools {
+    if (typeof siteId !== "string" || !siteId) {
+      throw new TypeError('page.site(id) requires a site id such as "bing"');
+    }
+    return new SiteTools(this, siteId, this.#services.agentWorkspace());
   }
 
   async url(): Promise<string> {
@@ -2511,20 +3468,92 @@ class Page {
     );
   }
 
-  async screenshot(options: PageScreenshotOptions = {}): Promise<string> {
+  async screenshot(
+    options: PageScreenshotOptions = {},
+  ): Promise<string | string[]> {
     validatePublicApiOptions("Page.screenshot", options);
-    const { path, fullPage, ...captureOptions } = options;
+    const { path, fullPage, maxHeight, tiles, ...captureOptions } = options;
     if (path !== undefined) {
       assertAbsoluteFilePath(path, "page.screenshot path");
+    }
+    if ((tiles || maxHeight !== undefined) && fullPage !== true) {
+      throw new TypeError(
+        "page.screenshot tiles and maxHeight need fullPage: true",
+      );
+    }
+    if ((tiles || maxHeight !== undefined) && captureOptions.clip) {
+      throw new TypeError(
+        "page.screenshot tiles and maxHeight cannot be combined with clip",
+      );
     }
     const page = await this.#resolve();
     return this.#services.gate.withPage(page, async ({ sessionId }) => {
       await this.#activate(page.targetId);
+      if (fullPage !== true || captureOptions.clip) {
+        return this.#services.screenshot(
+          path,
+          fullPage === undefined
+            ? captureOptions
+            : { ...captureOptions, full: fullPage },
+          sessionId,
+        );
+      }
+      const size = await evaluateInSession<{ width: number; height: number }>(
+        this.#services,
+        sessionId,
+        "({ width: Math.max(document.documentElement.scrollWidth, innerWidth), height: Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0, innerHeight) })",
+        false,
+      );
+      const width = Math.max(1, Math.ceil(size?.width || 1));
+      const height = Math.max(1, Math.ceil(size?.height || 1));
+      if (tiles) {
+        const tileHeight = maxHeight ?? DEFAULT_TILE_HEIGHT;
+        const count = Math.min(MAX_TILES, Math.ceil(height / tileHeight));
+        const paths: string[] = [];
+        for (let i = 0; i < count; i += 1) {
+          const y = i * tileHeight;
+          paths.push(
+            await this.#services.screenshot(
+              path === undefined ? undefined : tilePath(path, i + 1),
+              {
+                ...captureOptions,
+                full: true,
+                clip: {
+                  x: 0,
+                  y,
+                  width,
+                  height: Math.min(tileHeight, height - y),
+                },
+              },
+              sessionId,
+            ),
+          );
+        }
+        if (count * tileHeight < height) {
+          bufferOutput(
+            `[ego-browser] page.screenshot: the page is ${height} px tall; ${count} tiles cover the top ${count * tileHeight} px. Pass a larger maxHeight for fewer, taller tiles.\n`,
+          );
+        }
+        return paths;
+      }
+      const limit = maxHeight ?? DEFAULT_FULL_PAGE_MAX_HEIGHT;
+      if (height <= limit) {
+        return this.#services.screenshot(
+          path,
+          { ...captureOptions, full: true },
+          sessionId,
+        );
+      }
+      bufferOutput(
+        `[ego-browser] page.screenshot: the page is ${height} px tall; captured the top ${limit} px. Use { fullPage: true, tiles: true } for the whole page.\n`,
+      );
       return this.#services.screenshot(
         path,
-        fullPage === undefined
-          ? captureOptions
-          : { ...captureOptions, full: fullPage },
+        {
+          ...captureOptions,
+          full: true,
+          clip: { x: 0, y: 0, width, height: limit },
+        },
         sessionId,
       );
     });
@@ -4061,4 +5090,346 @@ function compactPageTitle(value: string): string {
 function configuredPageBudget(): number {
   const configured = Number(process.env.EGO_BROWSER_PAGE_BUDGET || 8);
   return Number.isInteger(configured) && configured > 0 ? configured : 8;
+}
+
+function tilePath(path: string, n: number): string {
+  const match = /^(.*?)(\.[a-z0-9]+)?$/i.exec(path)!;
+  return `${match[1]}-${n}${match[2] || ".png"}`;
+}
+
+/** A selector usable with querySelectorAll in the page, or undefined. */
+function cssOnly(selector: string | undefined): string | undefined {
+  if (selector === undefined) return undefined;
+  if (/^(loc=|xpath=|text=|@|role=|css=)/.test(selector)) {
+    return selector.startsWith("css=") ? selector.slice(4) : undefined;
+  }
+  return selector;
+}
+
+/** Runs in the page: scroll the last item (or the window) one step further. */
+function scrollStep({ itemSelector }: { itemSelector?: string }): boolean {
+  let items: Element[] = [];
+  if (itemSelector) {
+    try {
+      items = Array.from(document.querySelectorAll(itemSelector));
+    } catch {
+      items = [];
+    }
+  }
+  const last = items[items.length - 1];
+  if (last) last.scrollIntoView({ block: "end" });
+  window.scrollBy(0, Math.max(200, Math.round(window.innerHeight * 0.9)));
+  // Inner scroll containers: move the nearest scrollable ancestor too.
+  let node = last?.parentElement || null;
+  while (node && node !== document.body) {
+    const style = getComputedStyle(node);
+    if (
+      /(auto|scroll)/.test(style.overflowY) &&
+      node.scrollHeight > node.clientHeight
+    ) {
+      node.scrollTop = node.scrollHeight;
+      break;
+    }
+    node = node.parentElement;
+  }
+  return true;
+}
+
+/** A cheap fingerprint of the current document's content. */
+async function pageSignature(
+  services: PageModelServices,
+  sessionId: string,
+): Promise<string> {
+  return evaluateInSession<string>(
+    services,
+    sessionId,
+    "(() => { const t = document.body ? document.body.innerText : ''; let h = 0; for (let i = 0; i < t.length; i += 1) h = (h * 31 + t.charCodeAt(i)) | 0; return location.href + '|' + t.length + '|' + h; })()",
+    false,
+  );
+}
+
+/** Turn PDF bytes into a read() result. */
+export function pdfReadResult(
+  bytes: Buffer,
+  url: string,
+  maxChars: number,
+): ReadResult {
+  const text = extractPdfText(bytes);
+  const { markdown, truncated } = truncateMarkdown(pdfMarkdown(text), maxChars);
+  let title = text.info.title || "";
+  if (!title) {
+    try {
+      title = decodeURIComponent(new URL(url).pathname.split("/").pop() || "");
+    } catch {
+      title = url;
+    }
+  }
+  return {
+    url,
+    title,
+    ...(text.info.author ? { byline: text.info.author } : {}),
+    markdown,
+    links: [],
+    words: countWords(markdown),
+    truncated,
+    source: "pdf",
+    pages: text.pages,
+    ...(text.warning ? { warning: text.warning } : {}),
+  };
+}
+
+/** Learned site tools bound to one Page (page.site(id)). */
+class SiteTools {
+  readonly #page: Page;
+  readonly #siteId: string;
+  readonly #workspace: string;
+
+  constructor(page: Page, siteId: string, workspace: string) {
+    this.#page = page;
+    this.#siteId = siteId;
+    this.#workspace = workspace;
+  }
+
+  get id(): string {
+    return this.#siteId;
+  }
+
+  /** The site's tools with their arguments and how to call them. */
+  async tools(): Promise<
+    Array<{
+      name: string;
+      kind: "node" | "browser";
+      api: number;
+      description: string;
+      args: Record<string, unknown>;
+      returns?: unknown;
+    }>
+  > {
+    const { manifest } = await findSiteSkill(this.#siteId, {
+      agentWorkspace: this.#workspace,
+    });
+    return siteToolList(manifest);
+  }
+
+  /** The site's notes (Markdown) as { file, content }. */
+  async notes(): Promise<Array<{ file: string; content: string }>> {
+    const { siteDir, manifest } = await findSiteSkill(this.#siteId, {
+      agentWorkspace: this.#workspace,
+    });
+    const out: Array<{ file: string; content: string }> = [];
+    for (const note of manifest.notes || []) {
+      const path = resolvePath(siteDir, note);
+      const rel = relative(resolvePath(siteDir), path);
+      if (rel.startsWith("..") || isAbsolutePath(rel)) continue;
+      try {
+        out.push({ file: note, content: await readFile(path, "utf8") });
+      } catch {
+        // A missing note is reported by validate:site-skills.
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Run a tool with this Page. Node tools must declare "api": 2 and receive
+   * (page, args); browser tools run inside this Page.
+   */
+  async run(toolName: string, args: Record<string, unknown> = {}) {
+    if (typeof toolName !== "string" || !toolName) {
+      throw new TypeError("site(id).run(name, args) requires a tool name");
+    }
+    if (!args || typeof args !== "object" || Array.isArray(args)) {
+      throw new TypeError("site(id).run args must be an object");
+    }
+    const { siteDir, manifest } = await findSiteSkill(this.#siteId, {
+      agentWorkspace: this.#workspace,
+    });
+    const nodeTool = (manifest.nodeTools || {})[toolName] as any;
+    if (nodeTool) {
+      if (nodeTool.api !== 2) {
+        throw attachHint(
+          new Error(
+            `site tool ${this.#siteId}/${toolName} uses the v1 helper API and cannot run with a Page`,
+          ),
+          `Run it with await runSiteTool(${JSON.stringify(this.#siteId)}, ${JSON.stringify(toolName)}, args) in a v1 script, or port it to "api": 2.`,
+        );
+      }
+      const path = resolvePath(siteDir, nodeTool.path);
+      const rel = relative(resolvePath(siteDir), path);
+      if (rel.startsWith("..") || isAbsolutePath(rel)) {
+        throw new Error("site tool path must stay inside the site skill");
+      }
+      const module = await import(
+        `${pathToFileURL(path).href}?t=${Date.now()}`
+      );
+      const tool = module[nodeTool.callable];
+      if (typeof tool !== "function") {
+        throw new Error(
+          `site skill ${JSON.stringify(this.#siteId)} is missing Node callable ${JSON.stringify(nodeTool.callable)}`,
+        );
+      }
+      return tool(this.#page, args);
+    }
+    if ((manifest.browserTools || {})[toolName]) {
+      const source = await loadBrowserToolSource(this.#siteId, toolName, {
+        agentWorkspace: this.#workspace,
+      });
+      return this.#page.evaluate(wrapBrowserTool(source, args));
+    }
+    const names = siteToolList(manifest).map((tool) => tool.name);
+    throw attachHint(
+      new Error(
+        `site ${JSON.stringify(this.#siteId)} has no tool ${JSON.stringify(toolName)}; tools: ${names.join(", ") || "none"}`,
+      ),
+      `List them with await page.site(${JSON.stringify(this.#siteId)}).tools().`,
+    );
+  }
+}
+
+/** A manifest's tools as a flat list. */
+export function siteToolList(manifest: any): Array<{
+  name: string;
+  kind: "node" | "browser";
+  api: number;
+  description: string;
+  args: Record<string, unknown>;
+  returns?: unknown;
+}> {
+  const out: Array<{
+    name: string;
+    kind: "node" | "browser";
+    api: number;
+    description: string;
+    args: Record<string, unknown>;
+    returns?: unknown;
+  }> = [];
+  for (const [name, schema] of Object.entries<any>(manifest?.nodeTools || {})) {
+    out.push({
+      name,
+      kind: "node",
+      api: schema?.api === 2 ? 2 : 1,
+      description: schema?.description || "",
+      args: schema?.args || {},
+      ...(schema?.returns ? { returns: schema.returns } : {}),
+    });
+  }
+  for (const [name, schema] of Object.entries<any>(
+    manifest?.browserTools || {},
+  )) {
+    out.push({
+      name,
+      kind: "browser",
+      api: 2,
+      description: schema?.description || "",
+      args: schema?.args || {},
+      ...(schema?.returns ? { returns: schema.returns } : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * Page actions reported to the host's round log (ego.logEvent), when the host
+ * offers one: action name, Page label, target, duration, outcome and error
+ * code. Never typed values, page content, or URL paths (only the origin).
+ */
+const LOGGED_PAGE_ACTIONS = [
+  "goto",
+  "reload",
+  "click",
+  "dblclick",
+  "hover",
+  "dragAndDrop",
+  "fill",
+  "selectOption",
+  "focus",
+  "press",
+  "setInputFiles",
+  "screenshot",
+  "snapshot",
+  "close",
+  "read",
+  "tables",
+  "structuredData",
+  "search",
+  "dismissConsent",
+  "scrollToLoad",
+  "fetch",
+  "waitForSelector",
+  "waitForSettled",
+] as const;
+
+const SELECTOR_ACTIONS = new Set([
+  "click",
+  "dblclick",
+  "hover",
+  "fill",
+  "selectOption",
+  "focus",
+  "press",
+  "setInputFiles",
+  "waitForSelector",
+]);
+
+/** What the round log may say about an action's target. */
+export function logTarget(action: string, args: unknown[]): string | undefined {
+  const first = args[0];
+  if (action === "goto" || action === "fetch") {
+    if (typeof first !== "string") return undefined;
+    try {
+      return new URL(first).origin;
+    } catch {
+      return undefined;
+    }
+  }
+  if (action === "search") {
+    const options = args[1] as { engine?: string } | undefined;
+    return options?.engine ?? "auto";
+  }
+  if (action === "dragAndDrop") {
+    return [args[0], args[1]]
+      .filter((value) => typeof value === "string")
+      .join(" -> ")
+      .slice(0, 200);
+  }
+  if (SELECTOR_ACTIONS.has(action) && typeof first === "string") {
+    return first.slice(0, 200);
+  }
+  return undefined;
+}
+
+for (const action of LOGGED_PAGE_ACTIONS) {
+  const original = (Page.prototype as any)[action];
+  if (typeof original !== "function") continue;
+  Object.defineProperty(Page.prototype, action, {
+    configurable: true,
+    writable: true,
+    value: async function loggedPageAction(this: Page, ...args: unknown[]) {
+      const services = pageServices.get(this);
+      if (!services || !services.hostCapabilities().logEvent) {
+        return original.apply(this, args);
+      }
+      const startedAt = services.now();
+      const entry = (ok: boolean, error?: unknown) => {
+        const code = (error as { error_code?: unknown })?.error_code;
+        const target = logTarget(action, args);
+        services.logEvent({
+          page: this.label,
+          action: `page.${action}`,
+          ...(target === undefined ? {} : { target }),
+          ms: Math.max(0, services.now() - startedAt),
+          ok,
+          ...(typeof code === "string" ? { error_code: code } : {}),
+        });
+      };
+      try {
+        const result = await original.apply(this, args);
+        entry(true);
+        return result;
+      } catch (error) {
+        entry(false, error);
+        throw error;
+      }
+    },
+  });
 }

@@ -1,0 +1,30 @@
+{
+  "id": "bing",
+  "name": "Bing Search",
+  "domains": ["bing.com", "www.bing.com"],
+  "notes": ["notes/overview.md"],
+  "nodeTools": {
+    "search": {
+      "api": 2,
+      "description": "Search Bing in the Page and return ranked results. Throws EGO_SITE_BLOCKED when Bing shows a human check, instead of returning an empty list.",
+      "path": "tools/search.js",
+      "callable": "search",
+      "args": {
+        "query": {
+          "type": "string",
+          "required": true,
+          "description": "Search query."
+        },
+        "maxResults": {
+          "type": "integer",
+          "required": false,
+          "description": "Most results to return (1-50, default 10)."
+        }
+      },
+      "returns": {
+        "type": "array",
+        "description": "Array of { rank, title, url, snippet } with tracking links unwrapped."
+      }
+    }
+  }
+}
