@@ -31,6 +31,40 @@ export function pageSnapshotLocatorCase() {
       timeout: 2_000,
     });
 
+    // Locator checks must stay linear: thousands of links once took over
+    // ten seconds and starved other CDP calls.
+    await page.evaluate(() => {
+      const many = document.createElement("section");
+      many.innerHTML = Array.from(
+        { length: 3000 },
+        (_, index) =>
+          '<a href="/nav-target?bulk=' + index + '">Bulk ' + index + "</a>" +
+          "<button>Bulk button " + index + "</button>",
+      ).join("");
+      document.body.append(many);
+    });
+    const started = Date.now();
+    const large = await page.snapshot({ scope: "full_page" });
+    const elapsed = Date.now() - started;
+    assert(elapsed < 10_000, "a 6000-control snapshot finishes in " + elapsed + "ms");
+    assertIncludes(
+      large,
+      "loc=href:/nav-target?bulk=2999",
+      "the last bulk link keeps its href locator"
+    );
+    assertIncludes(
+      large,
+      'loc=role:button[name="Bulk button 2999"]',
+      "the last bulk button keeps its role locator"
+    );
+    assert(
+      large
+        .split("\\n")
+        .filter((line) => line.includes("locator=duplicate"))
+        .every((line) => !line.includes(", loc=")),
+      "duplicate hrefs stay without a locator on a large page"
+    );
+
     await page.close();
   `;
 }

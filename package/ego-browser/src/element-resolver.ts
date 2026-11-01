@@ -487,26 +487,29 @@ async function validateRoleLocatorBackendNodes(
     )
   ).filter((item) => item !== undefined);
 
+  // Group nodes by role once; a snapshot checks one locator per element.
+  const byRole = new Map();
+  for (const { context, tree } of available) {
+    for (const node of tree?.nodes || []) {
+      if (node.ignored || !Number.isInteger(node.backendDOMNodeId)) continue;
+      const role = normalizeRole(extractAxString(node.role));
+      const item = { context, node, name: extractAxString(node.name) };
+      const list = byRole.get(role);
+      if (list) list.push(item);
+      else byRole.set(role, [item]);
+    }
+  }
+
   for (const entry of entries) {
-    const rawMatches = available.flatMap(({ context, tree }) =>
-      (tree?.nodes || [])
-        .filter(
-          (node) =>
-            !node.ignored &&
-            normalizeRole(extractAxString(node.role)) === entry.locator.role &&
-            roleNameMatches(
-              extractAxString(node.name),
-              entry.locator.name,
-              entry.locator.nameMode,
-            ) &&
-            Number.isInteger(node.backendDOMNodeId),
-        )
-        .map((node) => ({
-          backendNodeId: node.backendDOMNodeId,
-          frameId: context.frameId,
-          sessionId: context.sessionId,
-        })),
-    );
+    const rawMatches = (byRole.get(entry.locator.role) || [])
+      .filter(({ name }) =>
+        roleNameMatches(name, entry.locator.name, entry.locator.nameMode),
+      )
+      .map(({ context, node }) => ({
+        backendNodeId: node.backendDOMNodeId,
+        frameId: context.frameId,
+        sessionId: context.sessionId,
+      }));
     const framedNodeKeys = new Set(
       rawMatches
         .filter((match) => match.frameId)
@@ -1852,14 +1855,53 @@ function buildLocatorCountJs(locator) {
   return `(() => ${buildLocatorElementsJs(locator)}.length)()`;
 }
 
+/**
+ * A snapshot validates one href locator per link. Index the links once per
+ * batch instead of walking the document and parsing every URL per locator,
+ * which took seconds on pages with thousands of links.
+ */
+function batchHrefIndexHelper() {
+  return `
+  ${OPEN_SHADOW_QUERY_HELPER}
+  let __egoHrefIndexCache;
+  function __egoHrefIndex() {
+    if (__egoHrefIndexCache) return __egoHrefIndexCache;
+    __egoHrefIndexCache = new Map();
+    for (const el of __egoQueryAllOpenShadow("a[href]")) {
+      let keys;
+      try {
+        const u = new URL(el.href, location.href);
+        keys = new Set([u.pathname + u.search + u.hash, u.href]);
+      } catch {
+        continue;
+      }
+      for (const key of keys) {
+        const list = __egoHrefIndexCache.get(key);
+        if (list) list.push(el);
+        else __egoHrefIndexCache.set(key, [el]);
+      }
+    }
+    return __egoHrefIndexCache;
+  }
+`;
+}
+
+function batchLocatorElementsJs(locator) {
+  if (locator.kind === "href") {
+    return `(__egoHrefIndex().get(${JSON.stringify(locator.href)}) || [])`;
+  }
+  return buildLocatorElementsJs(locator);
+}
+
 function buildBatchLocatorCountJs(locators) {
   const queries = locators
     .map(
       (locator) =>
-        `() => Array.from(${buildLocatorElementsJs(locator)} || []).length`,
+        `() => Array.from(${batchLocatorElementsJs(locator)} || []).length`,
     )
     .join(",\n");
   return `(() => {
+            ${batchHrefIndexHelper()}
             const queries = [${queries}];
             return queries.map((query) => {
               try {
@@ -1872,9 +1914,16 @@ function buildBatchLocatorCountJs(locators) {
 }
 
 function buildBatchLocatorObjectsJs(locators) {
-  return `(() => [${locators
-    .map((locator) => buildLocatorFindJs(locator))
-    .join(",\n")}])()`;
+  return `(() => {
+            ${batchHrefIndexHelper()}
+            return [${locators
+              .map((locator) =>
+                locator.kind === "href"
+                  ? `(${batchLocatorElementsJs(locator)}[0] || null)`
+                  : buildLocatorFindJs(locator),
+              )
+              .join(",\n")}];
+          })()`;
 }
 
 function buildLocatorElementsJs(locator) {
