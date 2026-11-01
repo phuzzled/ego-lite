@@ -326,3 +326,72 @@ export function restoreResumeCase() {
     }
   `;
 }
+
+export function hostIdentityCase() {
+  return `
+    const caps = globalThis.ego.getHostCapabilities?.() || {};
+    if (!caps.ephemeralProfile || !caps.fillSecret) {
+      const page = await newPageAt(await taskSpace(taskName), baseUrl + "/extract/login");
+      if (!caps.fillSecret) {
+        await assertRejects(
+          () => page.fillSecret("#password", "e2e-secret"),
+          "not supported on this browser host",
+          "fillSecret explains it is unsupported"
+        );
+      }
+      await page.close();
+    } else {
+    const rejectsWithCode = async (fn, code, message) => {
+      try {
+        await fn();
+      } catch (error) {
+        assertEqual(error.error_code, code, message);
+        assert(typeof error.hint === "string" && error.hint.length > 0, message + " (with a hint)");
+        return;
+      }
+      throw new Error(message + ": expected rejection");
+    };
+    const list = await profiles();
+    assert(list.some((profile) => profile.id === "ephemeral" && profile.ephemeral === true), "the ephemeral profile is listed");
+
+    // A throwaway space: its own cookies, deleted by finish().
+    const name = taskName + " ephemeral";
+    const throwaway = await taskSpace(name, { profileId: "ephemeral" });
+    assertEqual(throwaway.profileId, "ephemeral", "the space knows its profile");
+    const page = throwaway.page("p1");
+    await page.goto(baseUrl + "/extract/login");
+    await page.evaluate(() => { document.cookie = "e2e_ephemeral=1; path=/"; });
+    const main = await newPageAt(await taskSpace(taskName), baseUrl + "/extract/login");
+    assert(!(await main.evaluate(() => document.cookie)).includes("e2e_ephemeral"), "the ephemeral cookie stays in its space");
+    const receipt = await throwaway.finish({ keep: "all" });
+    assertEqual(receipt.closedSpace, true, "finish reports an ephemeral space as closed");
+    assertEqual(receipt.keptManagedLabels.length, 0, "no Page outlives an ephemeral space");
+    assert(!(await listTaskSpaces()).some((space) => space.name === name), "the ephemeral space is gone");
+
+    // A stored secret is typed without reaching the script.
+    const { spawnSync } = await import("node:child_process");
+    const origin = new URL(baseUrl).origin;
+    const set = spawnSync(process.execPath, [process.argv[1], "secret", "set", "e2e-secret", "--origin", origin], {
+      input: "s3cret-value\n",
+      encoding: "utf8",
+    });
+    assertEqual(set.status, 0, "the secret is stored: " + set.stderr);
+    try {
+      const filled = await main.fillSecret("#password", "e2e-secret");
+      assertEqual(filled.filled, true, "the secret is filled");
+      assertEqual(filled.origin, origin, "the origin is reported");
+      assert(!JSON.stringify(filled).includes("s3cret"), "the value is not returned");
+      assertEqual(await main.evaluate(() => document.querySelector("#password").value.length), 12, "the field holds the secret");
+      const snap = await main.snapshot();
+      assert(!snap.includes("s3cret"), "the snapshot does not show the secret");
+      await rejectsWithCode(() => main.fillSecret("#password", "e2e-missing"), "EGO_SECRET_NOT_FOUND", "an unknown secret is reported");
+      const other = baseUrl.replace("127.0.0.1", "localhost");
+      await main.goto(other + "/extract/login");
+      await rejectsWithCode(() => main.fillSecret("#password", "e2e-secret"), "EGO_SECRET_ORIGIN_MISMATCH", "another origin is refused");
+    } finally {
+      spawnSync(process.execPath, [process.argv[1], "secret", "remove", "e2e-secret"], { encoding: "utf8" });
+      await main.close();
+    }
+    }
+  `;
+}

@@ -64,14 +64,15 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "profiles",
     signature: "await profiles()",
-    returns: "Promise<Array<{ id, name, isDefault }>>",
-    summary: "List browser profiles available for new task spaces.",
+    returns: "Promise<Array<{ id, name, isDefault, ephemeral? }>>",
+    summary:
+      'List browser profiles available for new task spaces. On hosts with throwaway profiles, { id: "ephemeral", ephemeral: true } gives a space its own empty cookie jar that finish() deletes.',
   },
   {
     name: "listTaskSpaces",
     signature: "await listTaskSpaces()",
     returns:
-      "Promise<Array<{ id, name, ownership?, createdBy?, profileId?, profileName?, recentTabTitles? }>>",
+      "Promise<Array<{ id, name, ownership?, createdBy?, profileId?, profileName?, recentTabTitles?, secrets? }>>",
     summary:
       "List Agent-owned and user-owned spaces available to reuse or claim.",
   },
@@ -122,6 +123,13 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
     signature: "task.name",
     returns: "string",
     summary: "Human-readable task-space name.",
+  },
+  {
+    name: "TaskSpace.profileId",
+    signature: "task.profileId",
+    returns: 'string | undefined // such as "Default" or "ephemeral"',
+    summary:
+      "The space's browser profile when the host reports it. finish() deletes an ephemeral space and reports closedSpace: true.",
   },
   {
     name: "TaskSpace.ownership",
@@ -474,6 +482,18 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
         ["css"],
       ),
       raw: option("boolean", "Bypass device-pixel-ratio correction."),
+    },
+  },
+  {
+    name: "Page.fillSecret",
+    signature:
+      "await page.fillSecret(target, secretName, { clear?, timeout? })",
+    returns: "Promise<{ filled, secret, origin }> // never the value",
+    summary:
+      "Type a secret the user stored with the host (ego-browser secret set) into a field: focuses target, then the host types the value only if this Page's origin is one the secret is registered for. The value never reaches the script, and snapshots redact it. Errors: EGO_SECRET_NOT_FOUND, EGO_SECRET_ORIGIN_MISMATCH, EGO_SECRET_NO_FIELD, EGO_SECRET_STORE_UNAVAILABLE; hosts without secrets throw EGO_UNSUPPORTED_ON_HOST.",
+    options: {
+      clear: option("boolean", "Clear the field first; defaults to true."),
+      timeout: actionTimeout,
     },
   },
   {

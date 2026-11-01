@@ -1616,3 +1616,15 @@ test("readPdf reads a PDF on disk and needs an absolute path", async () => {
     /absolute file path/,
   );
 });
+
+test("a space created with a profile knows its profileId", async () => {
+  const calls = [];
+  await withEgo(
+    ttlEgo(calls, { profiles: true, ephemeralProfile: true }),
+    async () => {
+      const task = await taskSpace("throwaway", { profileId: "ephemeral" });
+      assert.equal(task.profileId, "ephemeral");
+    },
+  );
+  assert.deepEqual(calls, [["createTaskSpace", "throwaway", "ephemeral"]]);
+});

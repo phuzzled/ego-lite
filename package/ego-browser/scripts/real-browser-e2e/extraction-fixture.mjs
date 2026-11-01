@@ -167,6 +167,15 @@ export function handleExtractionFixture(url, res) {
       );
       return true;
     }
+    case "/extract/login":
+      html(
+        res,
+        "Login fixture",
+        `<form><label>User <input id="user" name="user"></label>
+        <label>Password <input id="password" name="password" type="password"></label>
+        <button type="button">Sign in</button></form>`,
+      );
+      return true;
     case "/extract/tall":
       html(
         res,

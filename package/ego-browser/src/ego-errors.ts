@@ -338,6 +338,14 @@ const HINTS_BY_CODE: Record<string, string> = {
     "The browser host is at a limit (task spaces, Pages or memory). Close Pages you no longer need with await page.close(), finish old task spaces with await task.finish(), or run `ego-browser gc` (see `ego-browser status`); then retry once.",
   EGO_UNSUPPORTED_ON_HOST:
     "This browser host does not offer that feature. Continue without it, or use the Linux host (ego-browser) where it exists.",
+  EGO_SECRET_NOT_FOUND:
+    "No secret with that name is stored on this host. Ask the user to add it with `ego-browser secret set <name> --origin <https://site>`; never ask for the value in chat.",
+  EGO_SECRET_ORIGIN_MISMATCH:
+    "The secret may only be typed on the origins it was stored for. Check await page.url(); if this is the right site, the user can add its origin with `ego-browser secret set <name> --origin <origin>`.",
+  EGO_SECRET_NO_FIELD:
+    "No editable field took focus. Take a snapshot and pass the input's ref or a loc=role:textbox locator as the target.",
+  EGO_SECRET_STORE_UNAVAILABLE:
+    "The host's secret store cannot be read. Ask the user to check `ego-browser secret list`; do not ask for the secret in chat.",
   EGO_SITE_BLOCKED:
     'The site asked for a human check. Try another source (for search, engine: "bing"), or hand the task space to the user with await task.handOff(). Do not try to bypass the check.',
 };

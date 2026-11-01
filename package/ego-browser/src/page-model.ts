@@ -208,6 +208,12 @@ type TaskSpaceDescriptor = {
   createdBy?: string;
   ownership?: string;
   recentTabTitles?: string[];
+  profileId?: string;
+};
+
+type PageFillSecretOptions = {
+  clear?: boolean;
+  timeout?: number;
 };
 
 /**
@@ -574,6 +580,10 @@ type PageModelServices = {
     skipped: string[];
   }>;
   handOffRelay(): Promise<{ relay: Record<string, unknown> }>;
+  fillSecret(
+    name: string,
+    options: { targetId: string; clear: boolean },
+  ): Promise<{ filled: boolean; secret: string; origin: string }>;
   logEvent(entry: Record<string, unknown>): void;
   agentWorkspace(): string;
 };
@@ -862,6 +872,7 @@ const describeMissingPageToken = Symbol("describeMissingPage");
 /** Each Page's services, for the round-log wrapper below the class. */
 const pageServices = new WeakMap<object, PageModelServices>();
 const recordPageUrlToken = Symbol("recordPageUrl");
+const withSpaceToken = Symbol("withSpace");
 /** Memo key under which the SDK keeps each Page label's last URL. */
 const PAGE_URLS_MEMO_KEY = "__ego.pageUrls";
 const RESERVED_MEMO_PREFIX = "__ego.";
@@ -997,6 +1008,7 @@ const baseDefaultServices: Omit<PageModelServices, "ledger" | "pageBudget"> = {
         caps.restoreTaskSpaceTabs === true && has("restoreTaskSpaceTabs"),
       handOffRelay: caps.handOffRelay === true && has("handOffTaskSpace"),
       logEvent: caps.logEvent === true && has("logEvent"),
+      fillSecret: caps.fillSecret === true && has("fillSecret"),
     };
   },
   async taskSpaceMemo(key, write) {
@@ -1014,6 +1026,10 @@ const baseDefaultServices: Omit<PageModelServices, "ledger" | "pageBudget"> = {
       tabs: Array.isArray(result?.tabs) ? result.tabs : [],
       skipped: Array.isArray(result?.skipped) ? result.skipped : [],
     };
+  },
+  async fillSecret(name, options) {
+    const ego = browserEgo();
+    return invokeEgo("page.fillSecret", () => ego.fillSecret(name, options));
   },
   async handOffRelay() {
     const ego = browserEgo();
@@ -1098,6 +1114,8 @@ class TaskSpace {
   readonly createdBy?: string;
   readonly ownership?: string;
   readonly recentTabTitles?: string[];
+  /** The browser profile of this space when the host reports it. */
+  readonly profileId?: string;
   readonly #services: PageModelServices;
   #userPage?: Page | UnmanagedPage;
   #stopBrowserEvents?: () => void;
@@ -1111,6 +1129,7 @@ class TaskSpace {
     this.createdBy = descriptor.createdBy;
     this.ownership = descriptor.ownership;
     this.recentTabTitles = descriptor.recentTabTitles;
+    this.profileId = descriptor.profileId;
     this.#services = services;
   }
 
@@ -1368,6 +1387,19 @@ class TaskSpace {
         };
       }
 
+      if (this.profileId === "ephemeral") {
+        // The host deletes an ephemeral space on finish, with every tab and
+        // cookie: nobody can come back to a throwaway profile.
+        await this.#services.completeTaskSpace();
+        await this.#discardTerminalState();
+        return {
+          spaceId: this.spaceId,
+          closedSpace: true,
+          keptManagedLabels: [],
+          closedManagedLabels: Object.keys(ledger.pages),
+          preservedUnmanagedCount: 0,
+        };
+      }
       for (const label of labelsToClose) {
         await this.page(label).close();
       }
@@ -2124,7 +2156,8 @@ class Download {
   }
 
   cancel(): Promise<void> {
-    return this.#artifact.cancel();
+    // Browser.cancelDownload goes to the selected space's browser.
+    return this.#pageHandle[withSpaceToken](() => this.#artifact.cancel());
   }
 
   delete(): Promise<void> {
@@ -2568,6 +2601,51 @@ class Page {
     }
     const stats = snapshotStats(state, refs, pendingRequests);
     return { stats, warnings: snapshotWarnings(stats, state) };
+  }
+
+  /**
+   * Type a secret stored with the host into a field, without the value ever
+   * reaching this script: focus the target, then the host types the secret
+   * if this Page's origin is one the secret is registered for.
+   */
+  async fillSecret(
+    target: string,
+    name: string,
+    options: PageFillSecretOptions = {},
+  ): Promise<{ filled: boolean; secret: string; origin: string }> {
+    if (typeof target !== "string" || !target) {
+      throw new TypeError(
+        "page.fillSecret(target, name) requires a target selector, loc= locator or ref",
+      );
+    }
+    if (typeof name !== "string" || !name) {
+      throw new TypeError(
+        "page.fillSecret(target, name) requires the secret's name",
+      );
+    }
+    validatePublicApiOptions("Page.fillSecret", options);
+    if (!this.#services.hostCapabilities().fillSecret) {
+      throw unsupportedOnHost(
+        "page.fillSecret",
+        "this host keeps no secrets; ask the user to type it after task.handOff()",
+      );
+    }
+    await this.focus(
+      target,
+      options.timeout === undefined ? {} : { timeout: options.timeout },
+    );
+    const page = await this.#resolve();
+    return this.#services.gate.withPage(page, () =>
+      this.#services.fillSecret(name, {
+        targetId: page.targetId,
+        clear: options.clear !== false,
+      }),
+    );
+  }
+
+  /** Run a browser-level call with this Page's space selected. */
+  [withSpaceToken]<T>(operation: () => Promise<T>): Promise<T> {
+    return this.#services.gate.withSpace(this.spaceId, operation);
   }
 
   /**
@@ -5341,6 +5419,7 @@ const LOGGED_PAGE_ACTIONS = [
   "hover",
   "dragAndDrop",
   "fill",
+  "fillSecret",
   "selectOption",
   "focus",
   "press",
@@ -5360,6 +5439,7 @@ const LOGGED_PAGE_ACTIONS = [
 ] as const;
 
 const SELECTOR_ACTIONS = new Set([
+  "fillSecret",
   "click",
   "dblclick",
   "hover",

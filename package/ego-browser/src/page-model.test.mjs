@@ -7465,3 +7465,101 @@ test("page.site runs v2 Node tools with the Page and explains v1 tools", async (
     assert.throws(() => page.site(""), /requires a site id/);
   });
 });
+
+test("page.fillSecret focuses the target, then the host types the secret", async () => {
+  await withFixture(async (fixture) => {
+    const order = [];
+    const task = taskForRound(fixture, "round-a", {
+      hostCapabilities: () => ({ fillSecret: true }),
+      async fillSecret(name, options) {
+        order.push(["fillSecret", name, options]);
+        return { filled: true, secret: name, origin: "https://example.test" };
+      },
+    });
+    const page = await openTestPage(task, "https://example.test/login");
+    const result = await page.fillSecret("#password", "site-password");
+    assert.deepEqual(result, {
+      filled: true,
+      secret: "site-password",
+      origin: "https://example.test",
+    });
+    assert.deepEqual(order, [
+      ["fillSecret", "site-password", { targetId: page.targetId, clear: true }],
+    ]);
+    await page.fillSecret("#password", "site-password", { clear: false });
+    assert.equal(order.at(-1)[2].clear, false);
+    await assert.rejects(() => page.fillSecret("", "x"), TypeError);
+    await assert.rejects(() => page.fillSecret("#password"), /secret's name/);
+    await assert.rejects(
+      () => page.fillSecret("#password", "x", { value: "no" }),
+      /unknown option: value/,
+    );
+  });
+});
+
+test("page.fillSecret reports host errors with a hint and needs host support", async () => {
+  await withFixture(async (fixture) => {
+    const previous = globalThis.ego;
+    globalThis.ego = {
+      getHostCapabilities: () => ({ fillSecret: true }),
+      async fillSecret() {
+        return {
+          error: "secret is not registered for this origin",
+          error_code: "EGO_SECRET_ORIGIN_MISMATCH",
+        };
+      },
+    };
+    try {
+      const task = taskForRound(fixture, "round-a");
+      const page = await openTestPage(task, "https://example.test/login");
+      await assert.rejects(
+        () => page.fillSecret("#password", "other-site"),
+        (error) => {
+          assert.equal(error.error_code, "EGO_SECRET_ORIGIN_MISMATCH");
+          assert.match(error.hint, /origins it was stored for/);
+          return true;
+        },
+      );
+    } finally {
+      globalThis.ego = previous;
+    }
+    const plain = taskForRound(fixture, "round-b", {
+      hostCapabilities: () => ({}),
+    });
+    const page = await openTestPage(plain, "https://example.test/login");
+    await assert.rejects(
+      () => page.fillSecret("#password", "x"),
+      (error) => error.error_code === "EGO_UNSUPPORTED_ON_HOST",
+    );
+  });
+});
+
+test("finishing an ephemeral space reports it closed, even with keep: all", async () => {
+  await withFixture(async (fixture) => {
+    const lifecycle = [];
+    const task = createTaskSpaceHandle(
+      { id: 7, name: "throwaway", ownership: "agent", profileId: "ephemeral" },
+      {
+        ledger: new PageLedgerStore({ rootDir: fixture.rootDir }),
+        ...fixture.services,
+        async completeTaskSpace() {
+          lifecycle.push("finish");
+        },
+        async closeTaskSpace() {
+          lifecycle.push("close");
+        },
+      },
+    );
+    assert.equal(task.profileId, "ephemeral");
+    const page = await openTestPage(task, "https://example.test/one");
+    const receipt = await task.finish({ keep: "all" });
+    assert.deepEqual(receipt, {
+      spaceId: 7,
+      closedSpace: true,
+      keptManagedLabels: [],
+      closedManagedLabels: [page.label],
+      preservedUnmanagedCount: 0,
+    });
+    assert.deepEqual(lifecycle, ["finish"]);
+  });
+});

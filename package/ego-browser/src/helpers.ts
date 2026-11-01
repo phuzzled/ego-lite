@@ -223,6 +223,9 @@ async function createTaskSpaceResolution(
   const createdByAgent = {
     ...created,
     ownership: created.ownership || "agent",
+    ...(created.profileId === undefined && profileId !== undefined
+      ? { profileId }
+      : {}),
   };
   const descriptor =
     options.select === false

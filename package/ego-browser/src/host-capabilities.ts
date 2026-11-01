@@ -16,6 +16,9 @@ export type HostCapabilities = {
   handOffRelay?: boolean;
   handOffViewer?: boolean;
   logEvent?: boolean;
+  profiles?: boolean;
+  ephemeralProfile?: boolean;
+  fillSecret?: boolean;
 };
 
 const cache = new WeakMap<object, HostCapabilities>();

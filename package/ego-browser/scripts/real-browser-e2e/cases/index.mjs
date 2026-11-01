@@ -61,6 +61,7 @@ import { pageSettleCase } from "./page-settle.mjs";
 import { pageNetworkResponsesCase } from "./page-network-responses.mjs";
 import {
   hostFeaturesCase,
+  hostIdentityCase,
   hostRoundLogCase,
   pageConsentCase,
   pageReadCase,
@@ -234,6 +235,11 @@ export const e2eCases = [
   },
   { name: "host memo, relay and TTL", body: hostFeaturesCase },
   { name: "host round log", body: hostRoundLogCase },
+  {
+    name: "host profiles and secrets",
+    body: hostIdentityCase,
+    timeoutMs: 60_000,
+  },
   // Keep these two last: the host restarts its browser between them.
   { name: "restore Pages: prepare", body: restorePrepareCase },
   {
