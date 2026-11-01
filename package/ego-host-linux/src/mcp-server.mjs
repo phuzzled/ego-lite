@@ -550,6 +550,18 @@ export class McpServer {
       if (error?.error_code === "EGO_TASK_SPACE_NOT_FOUND") {
         this.tasks.delete(args.task ?? "main");
       }
+      const known = this.tasks.get(args.task ?? "main");
+      if (
+        (error?.error_code || error?.code) ===
+          "EGO_TASK_SPACE_USER_IN_CONTROL" &&
+        known &&
+        !error.hint
+      ) {
+        return toolError(
+          userInControlError(args.task ?? "main", known.spaceId, error),
+          error?.output,
+        );
+      }
       return toolError(error, error?.output);
     }
   }
@@ -562,8 +574,12 @@ export class McpServer {
       try {
         return await sdk.taskSpace(known.spaceId, { restorePages: true });
       } catch (error) {
-        if ((error?.error_code || error?.code) === "EGO_TASK_SPACE_NOT_FOUND") {
+        const code = error?.error_code || error?.code;
+        if (code === "EGO_TASK_SPACE_NOT_FOUND") {
           this.tasks.delete(taskName);
+        }
+        if (code === "EGO_TASK_SPACE_USER_IN_CONTROL") {
+          throw userInControlError(taskName, known.spaceId, error);
         }
         throw error;
       }
@@ -984,6 +1000,25 @@ function receiptText(receipt) {
 }
 
 /** A tool result that reports an error to the model, with the SDK hint. */
+/**
+ * A clean error for a task whose space the user controls. The SDK reports it
+ * from whichever call hit it first (for example "task.restorePages:
+ * manual_takeover"); the agent needs to know what to do instead.
+ */
+function userInControlError(taskName, spaceId, cause) {
+  const raw = String(cause?.message || "");
+  const reason = raw.replace(/^[\w.]+:\s*/, "").trim() || "manual_takeover";
+  return Object.assign(
+    new Error(
+      `The user controls space ${spaceId} (task "${taskName}", reason: ${reason}).`,
+    ),
+    {
+      error_code: "EGO_TASK_SPACE_USER_IN_CONTROL",
+      hint: "Wait until the user says they are done, then call browser_takeover. Use another task name to keep working meanwhile.",
+    },
+  );
+}
+
 export function toolError(error, output) {
   const details = errorDetails(error);
   const lines = [`Error: ${details.message}`];
