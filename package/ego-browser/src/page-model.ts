@@ -175,6 +175,7 @@ import {
 import {
   judgeSearchPage,
   parseSearchPage,
+  noResultsWarning,
   relevanceWarning,
   searchEngineOrder,
   searchUrl,
@@ -2865,6 +2866,7 @@ class Page {
     validatePublicApiOptions("Page.search", options);
     const max = Math.min(options.max ?? 10, 50);
     const blocked: SearchBlock[] = [];
+    let doubtful: SearchResult | undefined;
     for (const engine of searchEngineOrder(options.engine)) {
       const url = searchUrl(engine, query.trim());
       try {
@@ -2898,21 +2900,27 @@ class Page {
         ...(parsed?.noResults ? { noResults: true } : {}),
       });
       if (verdict.ok === true) {
-        return {
+        const warning = verdict.noResults
+          ? noResultsWarning(engine)
+          : relevanceWarning(query, verdict.results);
+        const answer: SearchResult = {
           engine,
           query,
           url: parsed?.url || url,
           results: verdict.results,
           blocked,
           ...(verdict.noResults ? { noResults: true } : {}),
-          ...(() => {
-            const warning = relevanceWarning(query, verdict.results);
-            return warning ? { warning } : {};
-          })(),
+          ...(warning ? { warning } : {}),
         };
+        if (!warning) return answer;
+        // A doubtful answer (nothing found, or unrelated results) is kept,
+        // but the next engine gets a chance to answer properly first.
+        doubtful ??= answer;
+        continue;
       }
       blocked.push(verdict.block);
     }
+    if (doubtful) return { ...doubtful, blocked };
     return { engine: null, query, results: [], blocked };
   }
 

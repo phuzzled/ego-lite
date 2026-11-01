@@ -17,6 +17,7 @@ import {
 } from "../../dist/src/extract/tables.js";
 import {
   judgeSearchPage,
+  noResultsWarning,
   relevanceWarning,
   searchEngineOrder,
   searchUrl,
@@ -347,4 +348,20 @@ test("results that never mention the query are flagged", () => {
     "no usable terms",
   );
   assert.equal(relevanceWarning("fetch", []), undefined);
+  const mixed = [
+    { title: "Using the Fetch API", url: "https://m.test/", snippet: "" },
+    { title: "Air New Zealand", url: "https://a.test/", snippet: "Flights" },
+    { title: "Speedtest", url: "https://s.test/", snippet: "Broadband" },
+  ];
+  assert.match(
+    relevanceWarning("fetch api", mixed),
+    /only 1 of 3 results mention a word of the query/,
+    "mostly unrelated results are flagged even when one is related",
+  );
+  assert.equal(relevanceWarning("fetch api", mixed.slice(0, 2)), undefined);
+});
+
+test("an engine that found nothing is reported as doubtful", () => {
+  assert.match(noResultsWarning("bing"), /^bing says it found nothing/);
+  assert.match(noResultsWarning("bing"), /try another engine/);
 });

@@ -40,14 +40,19 @@ export type SearchResult = {
   blocked: SearchBlock[];
   /** True when an engine answered and said it found nothing. */
   noResults?: boolean;
-  /** Set when the results look unrelated to the query (a soft block). */
+  /**
+   * Set when the results look unrelated to the query, or the engine said it
+   * found nothing: both can be a soft block. With engine "auto" the next
+   * engine is tried first.
+   */
   warning?: string;
 };
 
 /**
- * A warning when no result mentions any word of the query. Engines that
+ * A warning when most results mention no word of the query. Engines that
  * distrust a browser sometimes answer with unrelated results instead of a
- * check; this says so instead of passing them off as an answer.
+ * check (Bing does this from servers); this says so instead of passing them
+ * off as an answer.
  */
 export function relevanceWarning(
   query: string,
@@ -60,14 +65,23 @@ export function relevanceWarning(
     .split(/[^\p{L}\p{N}]+/u)
     .filter((term) => term.length >= 3);
   if (terms.length === 0) return undefined;
-  const related = results.some((result) => {
+  const related = results.filter((result) => {
     const text =
       `${result.title} ${result.snippet} ${result.url}`.toLowerCase();
     return terms.some((term) => text.includes(term));
-  });
-  return related
-    ? undefined
-    : "no result mentions any word of the query; the engine may be answering an automated browser with unrelated results. Check them, try another engine, or hand off to the user.";
+  }).length;
+  if (related === 0) {
+    return "no result mentions any word of the query; the engine may be answering an automated browser with unrelated results. Check them, try another engine, or hand off to the user.";
+  }
+  if (related * 2 < results.length) {
+    return `only ${related} of ${results.length} results mention a word of the query; the engine may be mixing in unrelated results for an automated browser. Check them, or try another engine.`;
+  }
+  return undefined;
+}
+
+/** The warning for an engine that says it found nothing. */
+export function noResultsWarning(engine: SearchEngine): string {
+  return `${engine} says it found nothing. From an automated browser an engine sometimes says so for ordinary queries; try another engine before concluding that nothing exists.`;
 }
 
 export const SEARCH_ENGINES: readonly SearchEngine[] = [

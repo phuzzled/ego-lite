@@ -7269,6 +7269,81 @@ test("page.tables turns grids into rows and writes one table as CSV", async () =
   });
 });
 
+function searchTask(fixture, pages) {
+  return taskForRound(fixture, "round-a", {
+    async cdp(method, params, sessionId, timeoutMs) {
+      if (method === "Page.getFrameTree") {
+        return { frameTree: { frame: { id: "f" } } };
+      }
+      if (method === "Page.createIsolatedWorld") {
+        return { executionContextId: 3 };
+      }
+      if (method === "Runtime.evaluate" && params.contextId === 3) {
+        const engine = /"engine":"(\w+)"/.exec(
+          JSON.parse(
+            /JSON\.parse\(("(?:[^"\\]|\\.)*")\)/.exec(params.expression)[1],
+          ),
+        )[1];
+        return { result: { type: "object", value: pages[engine] } };
+      }
+      return fixture.services.cdp(method, params, sessionId, timeoutMs);
+    },
+  });
+}
+
+test("page.search treats unrelated results and 'nothing found' as doubtful", async () => {
+  await withFixture(async (fixture) => {
+    const unrelated = {
+      url: "https://www.bing.com/search?q=rust",
+      results: [
+        { title: "Air New Zealand", url: "https://air.test/", snippet: "Fly" },
+        { title: "Speedtest", url: "https://speed.test/", snippet: "Fast" },
+      ],
+    };
+    const related = {
+      url: "https://html.duckduckgo.com/html/?q=rust",
+      results: [
+        { title: "Rust lifetimes", url: "https://rust.test/", snippet: "" },
+      ],
+    };
+    const google = {
+      url: "https://www.google.com/sorry/index",
+      blocked: "Google showed its unusual-traffic check (/sorry/)",
+      results: [],
+    };
+    let page = await searchTask(fixture, {
+      bing: unrelated,
+      duckduckgo: related,
+      google,
+    }).newPage();
+    const better = await page.search("rust lifetimes");
+    assert.equal(better.engine, "duckduckgo", "the next engine answers");
+    assert.equal(better.warning, undefined);
+
+    page = await searchTask(fixture, {
+      bing: unrelated,
+      duckduckgo: { ...google, url: "https://html.duckduckgo.com/html/" },
+      google,
+    }).newPage();
+    const doubtful = await page.search("rust lifetimes");
+    assert.equal(doubtful.engine, "bing", "the doubtful answer is kept last");
+    assert.equal(doubtful.results.length, 2);
+    assert.match(doubtful.warning, /no result mentions any word/);
+    assert.equal(doubtful.blocked.length, 2);
+
+    page = await searchTask(fixture, {
+      bing: {
+        url: "https://www.bing.com/search?q=x",
+        results: [],
+        noResults: true,
+      },
+    }).newPage();
+    const none = await page.search("linux kernel", { engine: "bing" });
+    assert.equal(none.noResults, true);
+    assert.match(none.warning, /bing says it found nothing/);
+  });
+});
+
 test("page.search reports blocked engines and falls through to the next", async () => {
   await withFixture(async (fixture) => {
     const pages = {

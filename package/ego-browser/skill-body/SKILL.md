@@ -217,8 +217,10 @@ console.log(found.engine, found.results, found.blocked, found.warning);
 
 `search()` tries Bing, then DuckDuckGo, then Google. An engine that shows a bot
 check is listed in `blocked`, never returned as empty results; `engine` is
-`null` when all were blocked. `warning` means no result mentions the query.
-Google and DuckDuckGo often block automated browsers.
+`null` when all were blocked. `warning` means the answer is doubtful: most
+results do not mention the query, or the engine said it found nothing (Bing
+does both to automated browsers). With the default engine the next one is
+tried first. Google and DuckDuckGo often block automated browsers.
 
 ### Semantic pages: snapshot and selectors
 
