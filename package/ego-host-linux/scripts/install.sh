@@ -14,6 +14,11 @@
 #   EGO_LITE_SHA256 expected SHA-256 of the downloaded source archive; the
 #                   install stops when it does not match
 #   EGO_LITE_CHROME_FOR_TESTING=1  always download Chrome for Testing
+#                   (x86_64 only; there is no Linux arm64 build)
+#   EGO_LITE_VIEWER=1   also install xvfb, x11vnc and novnc with apt-get (sudo),
+#                   for hand-off on a server: ego-browser start --display virtual
+#   EGO_LITE_SERVICE=1  install and enable a systemd user service
+#                   (EGO_LITE_SERVICE=virtual: the service uses a virtual display)
 
 set -eu
 
@@ -104,6 +109,7 @@ install_host() {
 	staged="$TEMP_DIR/host"
 	mkdir -p "$staged"
 	cp -R "$root/package/ego-host-linux/bin" "$root/package/ego-host-linux/src" \
+		"$root/package/ego-host-linux/share" \
 		"$root/package/ego-host-linux/package.json" "$staged/"
 	rm -f "$staged"/src/*.test.mjs "$staged"/src/test-support.mjs
 	cp -R "$root/package/ego-browser/dist/out" "$staged/sdk"
@@ -142,6 +148,44 @@ has_system_browser() {
 	return 1
 }
 
+# Chrome for Testing has no Linux arm64 build. There the distro Chromium (not
+# the snap) or Playwright's arm64 Chromium is used; ego-browser finds both.
+PLAYWRIGHT_VERSION="1.49.1"
+
+machine_arch() {
+	case "$(uname -m)" in
+	x86_64 | amd64) printf 'x86_64\n' ;;
+	aarch64 | arm64) printf 'arm64\n' ;;
+	*) uname -m ;;
+	esac
+}
+
+install_playwright_chromium() {
+	log "No Chromium found, and Chrome for Testing has no Linux arm64 build."
+	log "Downloading Playwright's Chromium (playwright@$PLAYWRIGHT_VERSION) ..."
+	npx --yes "playwright@$PLAYWRIGHT_VERSION" install chromium ||
+		die "failed to install Playwright's Chromium. Install a non-snap chromium, or set EGO_LITE_CHROME"
+	log "If it fails to start, install its libraries:"
+	log "  sudo npx --yes playwright@$PLAYWRIGHT_VERSION install-deps chromium"
+}
+
+# Optional packages for hand-off on a server without a screen.
+check_viewer_packages() {
+	missing=""
+	command -v Xvfb >/dev/null 2>&1 || missing="$missing xvfb"
+	command -v x11vnc >/dev/null 2>&1 || missing="$missing x11vnc"
+	[ -f /usr/share/novnc/vnc.html ] || missing="$missing novnc"
+	[ -n "$missing" ] || return 0
+	if [ "${EGO_LITE_VIEWER:-0}" = "1" ] && command -v apt-get >/dev/null 2>&1; then
+		log "Installing the viewer packages:$missing"
+		# shellcheck disable=SC2086 # one word per package
+		sudo apt-get install -y $missing || log "warning: could not install$missing"
+		return 0
+	fi
+	log "Optional, for hand-off on a server (ego-browser start --display virtual, ego-browser view):"
+	log "  sudo apt-get install -y$missing"
+}
+
 install_chrome_for_testing() {
 	require_command curl
 	require_command unzip
@@ -172,16 +216,33 @@ main() {
 	install_host "$root"
 	install_entry_skill
 
-	if [ "${EGO_LITE_CHROME_FOR_TESTING:-0}" = "1" ] || ! has_system_browser; then
+	arch=$(machine_arch)
+	if [ "$arch" = "arm64" ]; then
+		if [ "${EGO_LITE_CHROME_FOR_TESTING:-0}" = "1" ]; then
+			log "warning: Chrome for Testing has no Linux arm64 build; ignoring EGO_LITE_CHROME_FOR_TESTING"
+		fi
+		has_system_browser || install_playwright_chromium
+	elif [ "$arch" != "x86_64" ]; then
+		has_system_browser || die "no Chromium for $arch; install one and set EGO_LITE_CHROME"
+	elif [ "${EGO_LITE_CHROME_FOR_TESTING:-0}" = "1" ] || ! has_system_browser; then
 		install_chrome_for_testing
 	fi
+	check_viewer_packages
 
 	case ":$PATH:" in
 	*":$BIN_DIR:"*) ;;
 	*) log "Add $BIN_DIR to PATH: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
 	esac
 
-	"$BIN_DIR/ego-browser" start >/dev/null || die "the ego lite daemon did not start"
+	case "${EGO_LITE_SERVICE:-0}" in
+	1) "$BIN_DIR/ego-browser" service install || die "the systemd user service did not install" ;;
+	virtual)
+		"$BIN_DIR/ego-browser" service install --display virtual ||
+			die "the systemd user service did not install"
+		;;
+	0) "$BIN_DIR/ego-browser" start >/dev/null || die "the ego lite daemon did not start" ;;
+	*) die "EGO_LITE_SERVICE must be 1, virtual or 0" ;;
+	esac
 	log "ego lite is ready. Check with: ego-browser status"
 }
 
