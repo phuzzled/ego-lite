@@ -54,6 +54,76 @@ jobs:
           name: ego-browser-release-payload
           path: package/ego-browser/dist/ego-browser-release-payload.tar.gz
 
+  # The Linux host against a real browser: unit tests, then the SDK's
+  # real-browser E2E suite through the host CLI, headless and headed on Xvfb.
+  linux-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      EGO_BROWSER_REAL_E2E_CLI: ${{ github.workspace }}/package/ego-host-linux/bin/ego-browser.mjs
+      XDG_RUNTIME_DIR: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package/ego-browser/package-lock.json
+      - name: Test Linux host
+        working-directory: package/ego-host-linux
+        run: npm test
+      - name: Install SDK dependencies
+        working-directory: package/ego-browser
+        run: npm ci
+      - name: Install Chrome for Testing
+        id: chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+          install-dependencies: true
+      - name: Install Xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Allow the Chrome sandbox
+        # Ubuntu 24.04 blocks unprivileged user namespaces for binaries
+        # without an AppArmor profile, which includes Chrome for Testing.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: E2E, headless
+        working-directory: package/ego-browser
+        env:
+          EGO_LITE_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          export HOME="$RUNNER_TEMP/home-headless"
+          mkdir -p "$HOME"
+          # Real-browser runs can flake; retry once with a fresh daemon.
+          node scripts/run-real-browser-e2e.mjs || {
+            node "$EGO_BROWSER_REAL_E2E_CLI" stop
+            node scripts/run-real-browser-e2e.mjs
+          }
+          node "$EGO_BROWSER_REAL_E2E_CLI" stop
+      - name: E2E, headed on Xvfb
+        working-directory: package/ego-browser
+        env:
+          EGO_LITE_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+          EGO_LITE_HEADLESS: "0"
+          EGO_LITE_PASSWORD_STORE: basic
+        run: |
+          export HOME="$RUNNER_TEMP/home-headed"
+          mkdir -p "$HOME"
+          xvfb-run -a sh -c 'node scripts/run-real-browser-e2e.mjs || {
+            node "$EGO_BROWSER_REAL_E2E_CLI" stop
+            node scripts/run-real-browser-e2e.mjs
+          }; status=$?; node "$EGO_BROWSER_REAL_E2E_CLI" stop; exit $status'
+      - name: Upload daemon logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-host-logs
+          path: |
+            ${{ runner.temp }}/home-*/.local/state/ego-lite/daemon.log
+            ${{ runner.temp }}/home-*/.local/state/ego-lite/events.jsonl
+            ${{ runner.temp }}/home-*/.local/state/ego-lite/rounds/
+          if-no-files-found: ignore
+
   release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: test
