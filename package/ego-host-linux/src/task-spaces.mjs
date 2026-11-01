@@ -45,6 +45,8 @@ const ACTIVITY_SAVE_MS = 60_000;
 
 export class TaskSpaceRegistry {
   #spaces = new Map();
+  /** Tabs Chrome is creating, per space id: they count against limits. */
+  #pendingTabs = new Map();
   #nextId = 1;
   #browser;
   #save;
@@ -222,17 +224,21 @@ export class TaskSpaceRegistry {
       lastActivity: this.#now(),
     };
     if (ttl.value !== undefined) space.ttlMs = ttl.value;
+    // Hold the slot and the name before the first await: concurrent creates
+    // (many one-shot commands at once) must see each other, or they all pass
+    // the limit and name checks above.
+    this.#spaces.set(space.id, space);
     if (profile.kind === "ephemeral") {
       try {
         space.browserContextId = await this.#browser.createContext();
       } catch (error) {
+        this.#spaces.delete(space.id);
         return egoError(
           `Cannot create an ephemeral profile: ${error?.message || error}`,
           "EGO_BROWSER_UNAVAILABLE",
         );
       }
     }
-    this.#spaces.set(space.id, space);
     const tab = await this.createTab(space.id, "about:blank");
     if (tab.error_code) {
       this.#spaces.delete(space.id);
@@ -343,6 +349,8 @@ export class TaskSpaceRegistry {
     const space = this.#spaces.get(id);
     const anchor = space.activeTargetId ?? space.targets.at(-1);
     let targetId;
+    // Count the tab while Chrome creates it, so concurrent creates see it.
+    this.#pendingTabs.set(id, (this.#pendingTabs.get(id) ?? 0) + 1);
     try {
       targetId = await this.#browser.createTarget(url, {
         anchor,
@@ -354,6 +362,10 @@ export class TaskSpaceRegistry {
         String(error?.message || error),
         error?.error_code || "EGO_OPERATION_FAILED",
       );
+    } finally {
+      const left = this.#pendingTabs.get(id) - 1;
+      if (left > 0) this.#pendingTabs.set(id, left);
+      else this.#pendingTabs.delete(id);
     }
     // The space may have been closed while the browser created the tab.
     if (!this.#spaces.has(id)) {
@@ -620,19 +632,23 @@ export class TaskSpaceRegistry {
   #pageLimit(id) {
     const limits = this.#limits();
     const space = id === null ? null : this.#spaces.get(id);
+    const own = space
+      ? space.targets.length + (this.#pendingTabs.get(id) ?? 0)
+      : 0;
     if (
       space &&
       limits.maxPagesPerSpace > 0 &&
-      space.targets.length >= limits.maxPagesPerSpace
+      own >= limits.maxPagesPerSpace
     ) {
       return resourceLimit(
-        `task space ${id} has ${space.targets.length} pages (limit ${limits.maxPagesPerSpace})`,
+        `task space ${id} has ${own} pages (limit ${limits.maxPagesPerSpace})`,
       );
     }
-    const pages = [...this.#spaces.values()].reduce(
+    let pages = [...this.#spaces.values()].reduce(
       (sum, each) => sum + each.targets.length,
       0,
     );
+    for (const count of this.#pendingTabs.values()) pages += count;
     if (limits.maxTotalPages > 0 && pages >= limits.maxTotalPages) {
       return resourceLimit(
         `${pages} pages are open in all task spaces (limit ${limits.maxTotalPages})`,

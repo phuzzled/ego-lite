@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { DEFAULT_CONFIG } from "./config.mjs";
 import { TaskSpaceRegistry, browserOfProfile } from "./task-spaces.mjs";
 
 const profiles = {
@@ -162,5 +163,60 @@ describe("TaskSpaceRegistry profiles", () => {
     await registry.createTaskSpace("login", "work");
     await registry.handOffTaskSpace(1);
     assert.deepEqual(browser.shown, ["T1"]);
+  });
+});
+
+describe("TaskSpaceRegistry concurrent creates", () => {
+  const slow = () => {
+    const browser = fakeBrowser();
+    const wait = () => new Promise((done) => setTimeout(done, 5));
+    const { createContext, createTarget } = browser;
+    browser.createContext = async () => (await wait(), createContext());
+    browser.createTarget = async (...args) => (
+      await wait(),
+      createTarget(...args)
+    );
+    return browser;
+  };
+
+  it("holds the space and page limits and unique names", async () => {
+    const registry = new TaskSpaceRegistry({
+      browser: slow(),
+      profiles,
+      limits: () => ({ ...DEFAULT_CONFIG, maxTaskSpaces: 3, maxTotalPages: 0 }),
+    });
+    const results = await Promise.all([
+      ...Array.from({ length: 6 }, (_, i) =>
+        registry.createTaskSpace(`one-shot ${i}`, "ephemeral"),
+      ),
+    ]);
+    assert.equal(results.filter((r) => r.id).length, 3);
+    assert.equal(
+      results.filter((r) => r.error_code === "EGO_RESOURCE_LIMIT").length,
+      3,
+    );
+    const named = new TaskSpaceRegistry({ browser: slow(), profiles });
+    const same = await Promise.all([
+      named.createTaskSpace("same", "ephemeral"),
+      named.createTaskSpace("same", "ephemeral"),
+    ]);
+    assert.deepEqual(same.map((r) => r.error_code ?? "ok").sort(), [
+      "EGO_TASK_SPACE_NAME_IN_USE",
+      "ok",
+    ]);
+  });
+
+  it("counts tabs Chrome is still creating against the page limits", async () => {
+    const registry = new TaskSpaceRegistry({
+      browser: slow(),
+      profiles,
+      limits: () => ({ ...DEFAULT_CONFIG, maxPagesPerSpace: 3 }),
+    });
+    await registry.createTaskSpace("a");
+    const tabs = await Promise.all(
+      Array.from({ length: 4 }, () => registry.createTab(1, "about:blank")),
+    );
+    assert.equal(tabs.filter((t) => t.targetId).length, 2);
+    assert.equal(registry.describe(1).targets.length, 3);
   });
 });
