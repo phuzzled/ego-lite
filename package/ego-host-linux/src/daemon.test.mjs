@@ -5,10 +5,30 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { acquireLock, isDaemonProcess } from "./daemon.mjs";
+import { acquireLock, isDaemonProcess, readSaved } from "./daemon.mjs";
 
 const tempLock = () =>
   join(mkdtempSync(join(tmpdir(), "ego-lite-lock-")), "daemon.lock");
+
+describe("readSaved", () => {
+  it("keeps a corrupt spaces.json aside and says so", () => {
+    const file = join(mkdtempSync(join(tmpdir(), "ego-lite-saved-")), "s.json");
+    const lines = [];
+    assert.equal(
+      readSaved(file, (line) => lines.push(line)),
+      undefined,
+    );
+    assert.deepEqual(lines, []);
+    writeFileSync(file, "{corrupt");
+    assert.equal(
+      readSaved(file, (line) => lines.push(line)),
+      undefined,
+    );
+    assert.equal(readFileSync(`${file}.corrupt`, "utf8"), "{corrupt");
+    assert.equal(existsSync(file), false);
+    assert.match(lines[0], /not valid JSON; kept it as .*s\.json\.corrupt/);
+  });
+});
 
 describe("acquireLock", () => {
   it("takes a free lock and records its pid", () => {

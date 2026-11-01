@@ -21,6 +21,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -990,10 +991,29 @@ function broadcast(clients, event, data) {
   }
 }
 
-function readSaved(file) {
+export function readSaved(file, report = log) {
+  let text;
   try {
-    return JSON.parse(readFileSync(file, "utf8"));
+    text = readFileSync(file, "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      report(`cannot read ${file} (${error.code}); starting with no spaces`);
+    }
+    return undefined;
+  }
+  try {
+    return JSON.parse(text);
   } catch {
+    // Keep the broken file for a look instead of saving over it.
+    const kept = `${file}.corrupt`;
+    try {
+      renameSync(file, kept);
+    } catch {
+      // Read-only state dir: the next save fails and says so.
+    }
+    report(
+      `${file} is not valid JSON; kept it as ${kept} and started with no task spaces`,
+    );
     return undefined;
   }
 }
