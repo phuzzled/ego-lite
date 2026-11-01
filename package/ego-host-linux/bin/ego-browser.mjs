@@ -1149,8 +1149,19 @@ async function connectDaemon(env = process.env, timeoutMs = 40_000) {
       if (child.exitCode) break;
     }
   }
+  // Say why, so an agent sees "EACCES ... daemon.lock" or "no Chrome" at once.
+  let last = "";
+  try {
+    last =
+      readFileSync(logFile, "utf8").trim().split("\n").at(-1)?.slice(0, 300) ??
+      "";
+  } catch {
+    // No log to quote.
+  }
   throw Object.assign(
-    new Error(`ego lite daemon did not start; see ${logFile}`),
+    new Error(
+      `ego lite daemon did not start; see ${logFile}${last ? ` (last line: ${last})` : ""}`,
+    ),
     { error_code: "EGO_BROWSER_UNAVAILABLE" },
   );
 }
