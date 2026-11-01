@@ -5578,6 +5578,7 @@ for (const mode of ["page", "same-process iframe", "OOPIF"]) {
 test("a navigation during snapshot capture never publishes refs for a mixed document", async () => {
   await withFixture(async (fixture) => {
     let loaderId = "before";
+    let captures = 0;
     const baseCdp = fixture.services.cdp;
     const task = taskForRound(fixture, "round-a", {
       async cdp(method, params, sessionId) {
@@ -5586,7 +5587,8 @@ test("a navigation during snapshot capture never publishes refs for a mixed docu
         return baseCdp(method, params, sessionId);
       },
       async snapshot() {
-        loaderId = "after";
+        captures += 1;
+        loaderId = `after-${captures}`;
         return {
           content: 'button "Save" [ref=1]',
           refs: [{ refId: 1, backendNodeId: 42 }],
@@ -5596,14 +5598,40 @@ test("a navigation during snapshot capture never publishes refs for a mixed docu
     const page = await openTestPage(task, "https://example.test/first");
     await assert.rejects(() => page.snapshot(), /Page changed during snapshot/);
     assert.equal(
+      captures,
+      3,
+      "a page that keeps changing is retried, then fails",
+    );
+    assert.equal(
       fixture.services.pageRefs.forTarget(page.targetId).get("1"),
       undefined,
     );
-    assert.match(
-      await page.snapshot(),
-      /\[ref=1\]/,
-      "an explicit retry captures the stable new document",
-    );
+  });
+});
+
+test("a snapshot retries once a navigation during capture settles", async () => {
+  await withFixture(async (fixture) => {
+    let loaderId = "before";
+    let captures = 0;
+    const baseCdp = fixture.services.cdp;
+    const task = taskForRound(fixture, "round-a", {
+      async cdp(method, params, sessionId) {
+        if (method === "Page.getFrameTree")
+          return { frameTree: { frame: { id: "main", loaderId } } };
+        return baseCdp(method, params, sessionId);
+      },
+      async snapshot() {
+        captures += 1;
+        loaderId = "after";
+        return {
+          content: 'button "Save" [ref=1]',
+          refs: [{ refId: 1, backendNodeId: 42 }],
+        };
+      },
+    });
+    const page = await openTestPage(task, "https://example.test/first");
+    assert.match(await page.snapshot(), /\[ref=1\]/);
+    assert.equal(captures, 2);
   });
 });
 

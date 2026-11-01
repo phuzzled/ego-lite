@@ -2,7 +2,7 @@ import { RefMap } from "./ref-map.js";
 
 const MAX_INVALIDATED_REFS_PER_TARGET = 10_000;
 
-type SnapshotRef = {
+export type SnapshotRef = {
   refId?: string | number;
   backendNodeId?: number;
   frameId?: string;

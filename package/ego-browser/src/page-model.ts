@@ -101,6 +101,7 @@ import {
   PageRefRegistry,
   pageRefDocumentId,
   type PageRefState,
+  type SnapshotRef,
 } from "./page-ref-registry.js";
 import {
   preparePageSnapshotResult,
@@ -444,6 +445,7 @@ export class PageEvaluationTimeoutError extends Error {
   }
 }
 
+const SNAPSHOT_ATTEMPTS = 3;
 const PAGE_CLOSE_CONFIRM_TIMEOUT_MS = 2_000;
 const PAGE_CLOSE_CONFIRM_INTERVAL_MS = 50;
 const CREATED_SPACE_TAB_TIMEOUT_MS = 2_000;
@@ -1733,38 +1735,48 @@ class Page {
       }
       const { root: _root, ...snapshotOptions } = options;
       const snapshotScope = options.scope ?? "only_within_viewport";
-      const beforeDocuments = await this.#pageDocuments(page, sessionId);
-      const result = await this.#services.snapshot({
-        ...snapshotOptions,
-        ...(root === undefined ? {} : { root }),
-        scope: snapshotScope,
-        includeActionMarks: options.includeActionMarks ?? true,
-        includeStableLocator: options.includeStableLocator ?? true,
-      });
-      const iframeSessions =
-        Array.isArray(result?.refs) && result.refs.length > 0
-          ? await this.#services.ensureFrameSessions(page.targetId)
-          : new Map<string, string>();
-      await preparePageSnapshotResult(
-        this.#services,
-        sessionId,
-        iframeSessions,
-        result,
-        rootContext,
-      );
-      const documents = await this.#pageDocuments(page, sessionId);
-      for (const ref of result?.refs || []) {
-        const documentId = pageRefDocumentId(ref, documents);
-        if (
-          !documentId ||
-          documentId !== pageRefDocumentId(ref, beforeDocuments)
-        ) {
+      let result: any;
+      let documents = new Map<string, string>();
+      // A frame that navigates while the snapshot runs (ads, consent
+      // banners) invalidates its refs. Take the snapshot again a few times.
+      for (let attempt = 1; ; attempt += 1) {
+        const beforeDocuments = await this.#pageDocuments(page, sessionId);
+        result = await this.#services.snapshot({
+          ...snapshotOptions,
+          ...(root === undefined ? {} : { root }),
+          scope: snapshotScope,
+          includeActionMarks: options.includeActionMarks ?? true,
+          includeStableLocator: options.includeStableLocator ?? true,
+        });
+        const iframeSessions =
+          Array.isArray(result?.refs) && result.refs.length > 0
+            ? await this.#services.ensureFrameSessions(page.targetId)
+            : new Map<string, string>();
+        await preparePageSnapshotResult(
+          this.#services,
+          sessionId,
+          iframeSessions,
+          result,
+          rootContext,
+        );
+        documents = await this.#pageDocuments(page, sessionId);
+        const changed = (result?.refs || []).some((ref: SnapshotRef) => {
+          const documentId = pageRefDocumentId(ref, documents);
+          return (
+            !documentId ||
+            documentId !== pageRefDocumentId(ref, beforeDocuments)
+          );
+        });
+        if (!changed) break;
+        if (attempt >= SNAPSHOT_ATTEMPTS) {
           throw new ElementResolutionError(
             "Page changed during snapshot; take a new snapshot",
             "transient",
           );
         }
-        ref.documentId = documentId;
+      }
+      for (const ref of result?.refs || []) {
+        ref.documentId = pageRefDocumentId(ref, documents);
       }
       await this.#loadRefs(page);
       this.#services.pageRefs.invalidateChangedDocuments(
