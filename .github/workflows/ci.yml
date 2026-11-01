@@ -38,6 +38,12 @@ jobs:
       - name: Test agent plugin
         working-directory: plugins/ego
         run: npm test
+      - name: Check Linux host style
+        working-directory: .
+        run: package/ego-browser/node_modules/.bin/prettier --check "package/ego-host-linux/**/*.{mjs,js,json}"
+      - name: Test Linux host
+        working-directory: package/ego-host-linux
+        run: npm test
       - run: npm run validate:site-skills
       - name: Archive release payload
         if: env.SHOULD_RELEASE == 'true'
