@@ -5,6 +5,12 @@
  * The browser's DevTools is a pipe that only this process holds. The CLI
  * reaches CDP through the same private socket ({"method":"cdpProxy"}), so no
  * other local user can drive the browser.
+ *
+ * Profiles: the Default profile's browser starts with the daemon. Each named
+ * profile gets its own browser process, pipe and mux, started on demand
+ * (browser-pool.mjs); a CLI round asks for a profile's browser with
+ * {"method":"cdpProxy","params":{"browser":"<profile id>"}}. Ephemeral task
+ * spaces are browser contexts in the Default browser.
  */
 import { createServer } from "node:net";
 import {
@@ -26,16 +32,24 @@ import {
   launchBrowser,
   wantsHeadless,
 } from "./browser-launcher.mjs";
+import { BrowserPool } from "./browser-pool.mjs";
 import { openWebSocket } from "./cdp-connection.mjs";
 import { CdpMux } from "./cdp-mux.mjs";
 import { loadConfig } from "./config.mjs";
+import {
+  ephemeralRefusal,
+  exportProfileData,
+  importProfileData,
+  parseOrigins,
+  parseSites,
+} from "./cookies.mjs";
 import {
   connectRunningDaemon,
   encode,
   lineReader,
 } from "./control-channel.mjs";
 import { findCommand, startVirtualDisplay } from "./display.mjs";
-import { egoError } from "./errors.mjs";
+import { egoError, isEgoError } from "./errors.mjs";
 import {
   HOST_VERSION,
   controlSocketPath,
@@ -44,8 +58,15 @@ import {
   spacesFile,
   stateDir,
 } from "./paths.mjs";
+import { DEFAULT_PROFILE_ID, ProfileStore } from "./profiles.mjs";
 import { cached, processTreeMemoryMb } from "./resources.mjs";
 import { RoundLog } from "./round-log.mjs";
+import {
+  SecretStore,
+  fillSecretInTarget,
+  redactSecrets,
+  secretNameProblem,
+} from "./secrets.mjs";
 import { captureSnapshot } from "./snapshot.mjs";
 import { TaskSpaceRegistry } from "./task-spaces.mjs";
 import { Viewer, findNoVnc } from "./viewer.mjs";
@@ -66,6 +87,7 @@ const SPACE_METHODS = new Set([
   "setActiveTarget",
   "memo",
   "restoreTabs",
+  "fillSecret",
 ]);
 
 /** "virtual" (Xvfb), or undefined for the desktop display or headless. */
@@ -103,10 +125,107 @@ export async function runDaemon(env = process.env) {
   const runDir = join(stateDir(env), "run");
   const display = displayMode(env);
 
+  const profiles = new ProfileStore({ env });
+  const secrets = new SecretStore({ env, log });
+  let registry;
+  let stopping = false;
+  let shutdown = () => {};
+
+  // Keep tab URLs on disk as they change, so a crash still knows what to
+  // reopen. Writes are batched.
+  const file = spacesFile(env);
+  let saveTimer = null;
+  const scheduleSave = () => {
+    if (saveTimer || !registry) return;
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      writeSaved(file, registry.snapshotState());
+    }, 1_000);
+    saveTimer.unref();
+  };
+
   let virtualDisplay = null;
-  let launched;
+  let browserEnv = env;
+  const onCommand = (_client, message) => {
+    if (message.method !== "Target.attachToTarget") return;
+    const id = registry?.spaceOfTarget(message.params?.targetId);
+    if (id !== null && id !== undefined) registry.touch(id);
+  };
+
+  /** Launch the browser of one profile, with its own pipe and mux. */
+  async function startBrowser(profileId) {
+    let profileEnv = browserEnv;
+    if (profileId !== DEFAULT_PROFILE_ID) {
+      if (profiles.resolve(profileId)?.kind !== "named") {
+        throw Object.assign(new Error(`Profile not found: ${profileId}`), {
+          error_code: "EGO_PROFILE_NOT_FOUND",
+        });
+      }
+      profileEnv = {
+        ...browserEnv,
+        EGO_LITE_PROFILE_DIR: profiles.userDataDir(profileId),
+      };
+    }
+    const launched = await launchBrowser(profileEnv);
+    try {
+      // All CDP of a browser goes through one connection: the pipe, or in
+      // port mode one WebSocket. CLI rounds reach it through its mux.
+      const upstream =
+        launched.transport ?? (await openWebSocket(launched.wsUrl));
+      const mux = new CdpMux(upstream, { onCommand });
+      await mux.start();
+      const cdp = mux.localConnection();
+      const version = await cdp.send("Browser.getVersion");
+      if (profileId !== DEFAULT_PROFILE_ID) {
+        log(
+          `browser for profile ${profileId} started (pid ${launched.child.pid})`,
+        );
+        roundLog.event("browser-start", { message: profileId });
+      }
+      return { ...launched, mux, cdp, version };
+    } catch (error) {
+      launched.child.kill("SIGKILL");
+      throw error;
+    }
+  }
+
+  const pool = new BrowserPool({
+    start: startBrowser,
+    limits: () => config,
+    onTarget: (method, _profileId, params) => {
+      if (!registry) return;
+      if (method === "Target.targetCreated") {
+        registry.handleTargetCreated(params.targetInfo);
+      } else if (method === "Target.targetInfoChanged") {
+        if (registry.spaceOfTarget(params.targetInfo.targetId) !== null) {
+          scheduleSave();
+        }
+      } else {
+        registry.handleTargetDestroyed(params.targetId);
+      }
+    },
+    onExit: (profileId, lost, expected) => {
+      if (stopping) return;
+      // A browser that dies on its own is a failure: exit non-zero so a
+      // supervisor (systemd Restart=on-failure) starts it again.
+      if (profileId === DEFAULT_PROFILE_ID) {
+        log("browser exited; stopping daemon");
+        shutdown(1);
+        return;
+      }
+      log(
+        `browser for profile ${profileId} ${expected ? "stopped" : "exited"}`,
+      );
+      roundLog.event(expected ? "browser-stop" : "browser-exit", {
+        message: profileId,
+      });
+      const urls = new Map(lost.map((tab) => [tab.targetId, tab.url]));
+      registry?.loseTargets([...urls.keys()], (targetId) => urls.get(targetId));
+    },
+  });
+
+  let main;
   try {
-    let browserEnv = env;
     if (display === "virtual") {
       virtualDisplay = await startVirtualDisplay({
         runDir,
@@ -122,28 +241,15 @@ export async function runDaemon(env = process.env) {
       delete browserEnv.WAYLAND_DISPLAY;
       log(`virtual display ${virtualDisplay.display}`);
     }
-    launched = await launchBrowser(browserEnv);
+    main = await pool.ensure(DEFAULT_PROFILE_ID);
   } catch (error) {
     virtualDisplay?.stop();
     rmSync(lockFile, { force: true });
     throw error;
   }
-  const { child, wsUrl, executable } = launched;
+  const { child, wsUrl, executable, cdp } = main;
+  const browserVersion = main.version;
   const headless = display !== "virtual" && wantsHeadless(env);
-  // All CDP goes through one connection: the pipe, or in port mode one
-  // WebSocket. The CLI reaches it through the mux on the private socket.
-  const upstream = launched.transport ?? (await openWebSocket(wsUrl));
-  let registry;
-  const mux = new CdpMux(upstream, {
-    onCommand: (_client, message) => {
-      if (message.method !== "Target.attachToTarget") return;
-      const id = registry?.spaceOfTarget(message.params?.targetId);
-      if (id !== null && id !== undefined) registry.touch(id);
-    },
-  });
-  await mux.start();
-  const cdp = mux.localConnection();
-  const browserVersion = await cdp.send("Browser.getVersion");
   // Page labels in the SDK belong to one browser run.
   const instanceId = `linux-host:${child.pid}`;
   const devtools = devtoolsMode(env);
@@ -152,85 +258,125 @@ export async function runDaemon(env = process.env) {
   );
   roundLog.event("start", { message: browserVersion.product });
 
-  const targets = new Map();
+  /** The connection of the browser that holds a tab. */
+  const cdpOf = (targetId) => {
+    const owner = pool.ownerOf(targetId);
+    if (!owner) throw new Error(`No browser holds tab ${targetId}`);
+    return owner.cdp;
+  };
+
   const browser = {
-    targetInfo: (targetId) => targets.get(targetId),
+    targetInfo: (targetId) => pool.targetInfo(targetId),
     activateTarget: (targetId) =>
-      cdp.send("Target.activateTarget", { targetId }),
-    closeTarget: (targetId) => cdp.send("Target.closeTarget", { targetId }),
-    async createTarget(url, { anchor } = {}) {
+      cdpOf(targetId).send("Target.activateTarget", { targetId }),
+    showTarget: (targetId) => showTarget(targetId),
+    closeTarget: (targetId) =>
+      cdpOf(targetId).send("Target.closeTarget", { targetId }),
+    createContext: async () =>
+      (await cdp.send("Target.createBrowserContext", {})).browserContextId,
+    disposeContext: (browserContextId) =>
+      cdp.send("Target.disposeBrowserContext", { browserContextId }),
+    async createTarget(
+      url,
+      { anchor, profileId = DEFAULT_PROFILE_ID, browserContextId } = {},
+    ) {
+      const instance = await pool.ensure(profileId);
+      const context = browserContextId ? { browserContextId } : {};
+      const created = (targetId) => {
+        // The reply can come before targetCreated; the tab is known at once.
+        if (!instance.targets.has(targetId)) {
+          instance.targets.set(targetId, { targetId, type: "page", url });
+        }
+        return targetId;
+      };
       // Chromium opens a plain new tab in the last active window, so focus a
       // tab of the space first. The first tab of a space gets its own window.
-      if (anchor && targets.has(anchor)) {
-        const focused = await cdp
+      if (anchor && instance.targets.has(anchor)) {
+        const focused = await instance.cdp
           .send("Target.activateTarget", { targetId: anchor })
           .then(() => true)
           .catch(() => false);
         if (focused) {
-          const { targetId } = await cdp.send("Target.createTarget", { url });
-          return targetId;
+          const { targetId } = await instance.cdp.send("Target.createTarget", {
+            url,
+            ...context,
+          });
+          return created(targetId);
         }
       }
-      const { targetId } = await cdp.send("Target.createTarget", {
+      const { targetId } = await instance.cdp.send("Target.createTarget", {
         url,
         newWindow: true,
         ...WINDOW_SIZE,
+        // No window manager on the virtual display: place windows ourselves.
+        ...(display === "virtual" ? { left: 0, top: 0 } : {}),
+        ...context,
       });
-      return targetId;
+      return created(targetId);
     },
   };
 
+  /**
+   * Bring a tab to the front for the user. On the virtual display, which has
+   * no window manager, also move its window to the corner and make it fill
+   * the screen, so the viewer shows that tab and nothing else.
+   */
+  async function showTarget(targetId) {
+    const owner = pool.ownerOf(targetId);
+    if (!owner) return;
+    if (display === "virtual") {
+      try {
+        const { windowId } = await owner.cdp.send(
+          "Browser.getWindowForTarget",
+          {
+            targetId,
+          },
+        );
+        await owner.cdp
+          .send("Browser.setWindowBounds", {
+            windowId,
+            bounds: { windowState: "normal" },
+          })
+          .catch(() => {});
+        await owner.cdp.send("Browser.setWindowBounds", {
+          windowId,
+          bounds: { left: 0, top: 0, ...WINDOW_SIZE },
+        });
+      } catch (error) {
+        log(`cannot arrange the window of a handed-off tab: ${error.message}`);
+      }
+    }
+    await owner.cdp.send("Target.activateTarget", { targetId });
+  }
+
   const clients = new Set();
-  const file = spacesFile(env);
-  const memoryMb = cached(() => processTreeMemoryMb(child.pid), 5_000);
+  // Memory of every running browser, for maxRssMb.
+  const memoryMb = cached(() => {
+    let total = 0;
+    for (const pid of pool.pids()) {
+      const mb = processTreeMemoryMb(pid);
+      if (mb === null) return null;
+      total += mb;
+    }
+    return total;
+  }, 5_000);
+  // Secrets filled per task space; their values are redacted from snapshots.
+  const filledSecrets = new Map();
   let viewer = null;
   registry = new TaskSpaceRegistry({
     browser,
     saved: readSaved(file),
     save: (state) => writeSaved(file, state),
     onChange: () => {
-      broadcast(clients, "spaces", spaceSummaries(registry));
+      broadcast(clients, "spaces", spaceSummaries(registry, filledSecrets));
       stopViewerAfterHandOff();
     },
     limits: () => config,
     memoryMb,
+    profiles,
   });
-
-  // Keep tab URLs on disk as they change, so a crash still knows what to
-  // reopen. Writes are batched.
-  let saveTimer = null;
-  const scheduleSave = () => {
-    if (saveTimer) return;
-    saveTimer = setTimeout(() => {
-      saveTimer = null;
-      writeSaved(file, registry.snapshotState());
-    }, 1_000);
-    saveTimer.unref();
-  };
-
-  cdp.onMessage((_text, message) => {
-    const info = message.params?.targetInfo;
-    if (message.method === "Target.targetCreated") {
-      targets.set(info.targetId, info);
-      registry.handleTargetCreated(info);
-    } else if (message.method === "Target.targetInfoChanged") {
-      const before = targets.get(info.targetId)?.url;
-      targets.set(info.targetId, info);
-      if (
-        before !== info.url &&
-        registry.spaceOfTarget(info.targetId) !== null
-      ) {
-        scheduleSave();
-      }
-    } else if (message.method === "Target.targetDestroyed") {
-      targets.delete(message.params.targetId);
-      registry.handleTargetDestroyed(message.params.targetId);
-    }
-  });
-  await cdp.send("Target.setDiscoverTargets", { discover: true });
-  const { targetInfos } = await cdp.send("Target.getTargets");
-  for (const info of targetInfos) targets.set(info.targetId, info);
-  registry.pruneTargets(targetInfos.map((info) => info.targetId));
+  // Only the Default browser runs now; tabs of other profiles are lost.
+  registry.pruneTargets([...main.targets.keys()]);
 
   /** Can a user see a space handed to them right now? */
   const handOffVisible = () =>
@@ -281,7 +427,13 @@ export async function runDaemon(env = process.env) {
         error.error_code || "EGO_VIEWER_UNAVAILABLE",
       );
     }
-    if (Number.isInteger(spaceId)) viewer.spaceId = spaceId;
+    if (Number.isInteger(spaceId)) {
+      viewer.spaceId = spaceId;
+      const space = registry.describe(spaceId);
+      if (space?.activeTargetId) {
+        await showTarget(space.activeTargetId).catch(() => {});
+      }
+    }
     const token = viewer.issueToken();
     const port = viewer.port;
     roundLog.event("viewer-start", {
@@ -313,26 +465,31 @@ export async function runDaemon(env = process.env) {
     }
     const dir = join(stateDir(env), "relay", `${id}-${Date.now()}`);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const { sessionId } = await cdp.send("Target.attachToTarget", {
+    const owner = cdpOf(targetId);
+    const { sessionId } = await owner.send("Target.attachToTarget", {
       targetId,
       flatten: true,
     });
     let image;
     try {
-      ({ data: image } = await cdp.send(
+      ({ data: image } = await owner.send(
         "Page.captureScreenshot",
         { format: "png" },
         sessionId,
       ));
     } finally {
-      await cdp.send("Target.detachFromTarget", { sessionId }).catch(() => {});
+      await owner
+        .send("Target.detachFromTarget", { sessionId })
+        .catch(() => {});
     }
-    const snapshot = await captureSnapshot(cdp, targetId, {});
+    const snapshot = await captureSnapshot(owner, targetId, {});
     const screenshot = join(dir, "screenshot.png");
     const snapshotFile = join(dir, "snapshot.txt");
     writeFileSync(screenshot, Buffer.from(image, "base64"), { mode: 0o600 });
-    writeFileSync(snapshotFile, snapshot.content, { mode: 0o600 });
-    const info = targets.get(targetId) || {};
+    writeFileSync(snapshotFile, redactFor(id, snapshot.content), {
+      mode: 0o600,
+    });
+    const info = pool.targetInfo(targetId) || {};
     return {
       dir,
       screenshot,
@@ -355,7 +512,106 @@ export async function runDaemon(env = process.env) {
         );
       }
     }
-    return { dryRun, actions };
+    // A named profile's browser with no task space and no round attached
+    // stops; the next space or round of that profile starts it again.
+    const inUse = registry.browsersInUse();
+    const browsers = pool
+      .running()
+      .filter(
+        (profileId) =>
+          profileId !== DEFAULT_PROFILE_ID &&
+          !inUse.has(profileId) &&
+          pool.clientCount(profileId) === 0,
+      );
+    if (!dryRun) {
+      for (const profileId of browsers) {
+        log(`gc: stopping the idle browser of profile ${profileId}`);
+        await pool.stop(profileId);
+      }
+    }
+    return { dryRun, actions, browsers };
+  }
+
+  /** The running browser of a profile whose cookies may be read or written. */
+  async function profileBrowser(profileId) {
+    const profile = profiles.resolve(profileId);
+    if (!profile) {
+      return egoError(
+        `Profile not found: ${profileId}`,
+        "EGO_PROFILE_NOT_FOUND",
+      );
+    }
+    if (profile.kind === "ephemeral") return ephemeralRefusal();
+    return pool.ensure(profile.id);
+  }
+
+  function checkScope(sites, origins) {
+    if (
+      !Array.isArray(sites) ||
+      sites.some((site) => typeof site !== "string")
+    ) {
+      throw new Error("sites must be a list of site names");
+    }
+    const checked = parseSites(sites.join(","));
+    return {
+      sites: checked,
+      origins: parseOrigins((origins || []).join(","), checked),
+    };
+  }
+
+  /** Text with the values of the secrets filled in a space replaced. */
+  function redactFor(id, text) {
+    const names = filledSecrets.get(id);
+    if (!names || names.size === 0) return text;
+    const values = [];
+    for (const name of names) {
+      try {
+        const secret = secrets.get(name);
+        if (secret) values.push(secret);
+      } catch {
+        // Unreadable store: nothing more to redact than before.
+      }
+    }
+    return redactSecrets(text, values);
+  }
+
+  async function fillSecret({ id, name, targetId, clear }) {
+    const problem = secretNameProblem(name);
+    if (problem) return egoError(problem, "EGO_INVALID_ARGUMENT");
+    const gate = registry.gate(id);
+    if (gate) return gate;
+    const space = registry.describe(id);
+    const target = targetId ?? space.activeTargetId ?? space.targets.at(-1);
+    if (!target || !space.targets.includes(target)) {
+      return egoError(
+        `Tab ${target ?? "(none)"} is not in task space ${id}`,
+        "EGO_WEB_CONTENTS_UNAVAILABLE",
+      );
+    }
+    let secret;
+    try {
+      secret = secrets.get(name);
+    } catch (error) {
+      return egoError(
+        `Cannot read the secret store ${secrets.file}: ${error.message}`,
+        "EGO_SECRET_STORE_UNAVAILABLE",
+      );
+    }
+    if (!secret) {
+      return egoError(
+        `No secret named ${name}. The user stores one with: ego-browser secret set ${name} --origin https://<site>`,
+        "EGO_SECRET_NOT_FOUND",
+      );
+    }
+    const result = await fillSecretInTarget(cdpOf(target), target, secret, {
+      clear: clear !== false,
+    });
+    if (result.filled) {
+      if (!filledSecrets.has(id)) filledSecrets.set(id, new Set());
+      filledSecrets.get(id).add(name);
+      broadcast(clients, "spaces", spaceSummaries(registry, filledSecrets));
+    }
+    return result;
   }
 
   let rounds = 0;
@@ -381,7 +637,7 @@ export async function runDaemon(env = process.env) {
         display: display ?? (headless ? "headless" : "desktop"),
         round: `${process.pid}.${rounds}`,
         browser: browserVersion.product,
-        spaces: spaceSummaries(registry),
+        spaces: spaceSummaries(registry, filledSecrets),
       };
     },
     status: () => ({
@@ -389,12 +645,14 @@ export async function runDaemon(env = process.env) {
       browser: browserVersion.product,
       devtools,
       display: display ?? (headless ? "headless" : "desktop"),
-      usage: registry.usage(),
+      usage: { ...registry.usage(), browsers: pool.running().length },
+      browsers: pool.running(),
       limits: {
         maxTaskSpaces: config.maxTaskSpaces,
         maxPagesPerSpace: config.maxPagesPerSpace,
         maxTotalPages: config.maxTotalPages,
         maxRssMb: config.maxRssMb,
+        maxBrowsers: config.maxBrowsers,
       },
       viewer: viewer?.running
         ? {
@@ -405,6 +663,75 @@ export async function runDaemon(env = process.env) {
         : null,
     }),
     listProfiles: () => registry.listProfiles(),
+    profiles: () => {
+      const { profiles: list } = profiles.list();
+      return {
+        profiles: list.map((profile) => ({
+          ...profile,
+          running: pool.running().includes(profile.id),
+          spaces: registry.spacesOfProfile(profile.id).length,
+        })),
+      };
+    },
+    createProfile: ({ id, name }) => profiles.create(id, name),
+    removeProfile: async ({ id }) => {
+      const profile = profiles.resolve(id);
+      if (!profile || profile.id !== id) {
+        return egoError(`Profile not found: ${id}`, "EGO_PROFILE_NOT_FOUND");
+      }
+      if (profile.kind !== "named") {
+        return egoError(
+          `${id} is a built-in profile and cannot be removed`,
+          "EGO_INVALID_ARGUMENT",
+        );
+      }
+      const using = registry.spacesOfProfile(id);
+      if (using.length > 0) {
+        return egoError(
+          `Profile ${id} is used by task space(s) ${using.join(", ")}. Close them first: ego-browser close ${using.join(" ")}`,
+          "EGO_PROFILE_BUSY",
+        );
+      }
+      await pool.stop(id);
+      const result = profiles.remove(id);
+      roundLog.event("profile-remove", { message: id });
+      return result;
+    },
+    exportProfileData: async ({ profileId, sites, origins }) => {
+      const scope = checkScope(sites, origins);
+      const instance = await profileBrowser(profileId);
+      if (isEgoError(instance)) return instance;
+      const data = await exportProfileData(instance.cdp, scope);
+      roundLog.event("cookies-export", {
+        message: `${profileId}: ${data.cookies.length} cookies`,
+      });
+      return data;
+    },
+    importProfileData: async ({ profileId, cookies, localStorage }) => {
+      const instance = await profileBrowser(profileId);
+      if (isEgoError(instance)) return instance;
+      const result = await importProfileData(instance.cdp, {
+        cookies,
+        localStorage,
+      });
+      roundLog.event("cookies-import", {
+        message: `${profileId}: ${result.cookies} cookies`,
+      });
+      // Chrome writes cookies to disk every 30 seconds. A named profile's
+      // browser that nothing uses is closed now, which writes them at once.
+      const id = instance.profileId;
+      if (
+        id !== DEFAULT_PROFILE_ID &&
+        !registry.browsersInUse().has(id) &&
+        pool.clientCount(id) === 0
+      ) {
+        await pool.stop(id);
+        result.saved = true;
+      }
+      return result;
+    },
+    fillSecret: (params) => fillSecret(params),
+    redact: ({ id, text }) => ({ text: redactFor(id, String(text ?? "")) }),
     listTaskSpaces: () => registry.listTaskSpaces(),
     describe: ({ id }) => registry.describe(id),
     createTaskSpace: async ({ name, profileId, ttlMs }) => {
@@ -466,11 +793,28 @@ export async function runDaemon(env = process.env) {
     socket.setEncoding("utf8");
     const onData = lineReader((message) => {
       if (message.method === "cdpProxy") {
-        // From here on this socket carries NUL-framed CDP for one client.
+        // From here on this socket carries NUL-framed CDP for one client,
+        // on the browser of one profile (Default unless asked).
         socket.off("data", onData);
         clients.delete(socket);
-        socket.write(encode({ id: message.id, result: "ok" }));
-        mux.attachStream(socket);
+        const profileId = message.params?.browser ?? DEFAULT_PROFILE_ID;
+        pool.ensure(String(profileId)).then(
+          (instance) => {
+            if (socket.destroyed) return;
+            socket.write(encode({ id: message.id, result: "ok" }));
+            instance.mux.attachStream(socket);
+          },
+          (error) => {
+            if (!socket.destroyed) {
+              socket.end(
+                encode({
+                  id: message.id,
+                  error: String(error?.message || error),
+                }),
+              );
+            }
+          },
+        );
         return;
       }
       respond(socket, message);
@@ -500,8 +844,7 @@ export async function runDaemon(env = process.env) {
   }, config.gcIntervalMs);
   gcTimer.unref();
 
-  let stopping = false;
-  function shutdown(code) {
+  shutdown = (code) => {
     if (stopping) return;
     stopping = true;
     clearInterval(gcTimer);
@@ -511,24 +854,22 @@ export async function runDaemon(env = process.env) {
     viewer?.stop("daemon stopped");
     server.close();
     for (const socket of clients) socket.destroy();
-    mux.close();
+    for (const profileId of pool.running()) {
+      const instance = pool.get(profileId);
+      instance.mux.close();
+      instance.cdp.close();
+      // A browser that stopped answering may ignore SIGTERM.
+      if (instance.child.exitCode === null) {
+        instance.child.kill(code ? "SIGKILL" : "SIGTERM");
+      }
+    }
     rmSync(socketPath, { force: true });
     rmSync(infoFile, { force: true });
     rmSync(lockFile, { force: true });
-    cdp.close();
-    // A browser that stopped answering may ignore SIGTERM.
-    if (child.exitCode === null) child.kill(code ? "SIGKILL" : "SIGTERM");
     virtualDisplay?.stop();
     process.exit(code);
-  }
+  };
 
-  // A browser that dies on its own is a failure: exit non-zero so a
-  // supervisor (systemd Restart=on-failure) starts it again.
-  child.on("exit", (code, signal) => {
-    if (stopping) return;
-    log(`browser exited (${code ?? signal}); stopping daemon`);
-    shutdown(1);
-  });
   virtualDisplay?.process.on("exit", () => {
     if (stopping) return;
     log("virtual display exited; stopping daemon");
@@ -611,9 +952,11 @@ async function daemonAnswers(env) {
   }
 }
 
-function spaceSummaries(registry) {
+function spaceSummaries(registry, filledSecrets = new Map()) {
   return registry.snapshotState().spaces.map((space) => ({
     id: space.id,
+    profileId: space.profileId,
+    secrets: filledSecrets.has(space.id),
     ownership: space.ownership,
     control: space.control,
     controlReason: space.controlReason,
