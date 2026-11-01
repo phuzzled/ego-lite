@@ -1,5 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, statSync, existsSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -54,6 +63,31 @@ describe("redactUrl", () => {
 });
 
 describe("RoundLog", () => {
+  it("tightens loose folders and files and never follows a link", () => {
+    const env = tempEnv();
+    const state = join(env.XDG_STATE_HOME, "ego-lite");
+    const dir = join(state, "rounds");
+    mkdirSync(dir, { recursive: true, mode: 0o777 });
+    chmodSync(state, 0o755);
+    chmodSync(dir, 0o777);
+    writeFileSync(join(dir, "7.jsonl"), "", { mode: 0o644 });
+    chmodSync(join(dir, "7.jsonl"), 0o644);
+    const victim = join(env.XDG_STATE_HOME, "victim");
+    writeFileSync(victim, "keep");
+    symlinkSync(victim, join(dir, "8.jsonl"));
+    const log = new RoundLog({ env });
+    log.append([
+      { space: 7, action: "page.goto", ok: true },
+      { space: 8, action: "page.goto", ok: true },
+    ]);
+    log.event("start");
+    assert.equal(statSync(dir).mode & 0o777, 0o700);
+    assert.equal(statSync(state).mode & 0o777, 0o700);
+    assert.equal(statSync(join(dir, "7.jsonl")).mode & 0o777, 0o600);
+    assert.equal(statSync(join(state, "events.jsonl")).mode & 0o777, 0o600);
+    assert.equal(readFileSync(victim, "utf8"), "keep");
+  });
+
   it("writes one file per space plus daemon events, private to the user", () => {
     const env = tempEnv();
     let clock = 100;

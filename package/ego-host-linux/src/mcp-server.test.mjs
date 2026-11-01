@@ -100,6 +100,17 @@ function fakeBrowser() {
             error_code: "EGO_TASK_SPACE_NOT_FOUND",
           });
         }
+        if (spaces.get(nameOrId).userControl) {
+          const message = spaces.get(nameOrId).userControl;
+          throw Object.assign(
+            new Error(
+              typeof message === "string"
+                ? message
+                : "task.restorePages: manual_takeover",
+            ),
+            { error_code: "EGO_TASK_SPACE_USER_IN_CONTROL" },
+          );
+        }
         log.reused.push(nameOrId);
         return makeTask(nameOrId);
       }
@@ -388,6 +399,33 @@ test("a space closed elsewhere is forgotten and recreated", async () => {
   assert.match(gone.result.content[0].text, /EGO_TASK_SPACE_NOT_FOUND/);
   await call(server, "browser_snapshot", {});
   assert.equal(browser.log.created.length, 2);
+});
+
+test("a task the user controls fails with a clean error and a hint", async () => {
+  const { server, browser } = makeServer();
+  await call(server, "browser_open", { url: "https://a.test/" });
+  browser.spaces.get(10).userControl = true;
+  const res = await call(server, "browser_snapshot", {});
+  assert.equal(res.result.isError, true);
+  const text = res.result.content[0].text;
+  assert.doesNotMatch(text, /task\.restorePages/);
+  assert.match(
+    text,
+    /The user controls space 10 \(task "main", reason: manual_takeover\)/,
+  );
+  assert.match(text, /error_code: EGO_TASK_SPACE_USER_IN_CONTROL/);
+  assert.match(text, /hint: .*browser_takeover/);
+  // The SDK's long message for scripts (with JavaScript to run) is dropped.
+  browser.spaces.get(10).userControl =
+    "page.snapshot: Control of this task space is with the user.\nWait, then:\n  const task = await takeOverTaskSpace(10);";
+  const long = await call(server, "browser_snapshot", {});
+  const longText = long.result.content[0].text;
+  assert.match(longText, /The user controls space 10 \(task "main"\)\./);
+  assert.doesNotMatch(longText, /takeOverTaskSpace|const task/);
+  // The task is kept, so browser_takeover can still find it.
+  browser.spaces.get(10).userControl = false;
+  const back = await call(server, "browser_snapshot", {});
+  assert.equal(back.result.isError, undefined);
 });
 
 test("browser_spaces marks this session's tasks; close_space closes by id", async () => {

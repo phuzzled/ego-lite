@@ -468,4 +468,19 @@ describe("TaskSpaceRegistry memo and restore", () => {
     assert.equal(space.lostTabs, undefined);
     assert.deepEqual(await restarted.restoreTabs(1), { tabs: [], skipped: [] });
   });
+
+  it("keeps the last known URLs when the browser dies before the last save", async () => {
+    await registry.createTaskSpace("work");
+    await registry.createTab(1, "https://a.test/list");
+    browser.infos.set("T2", { url: "https://a.test/list" });
+    registry.snapshotState(); // the batched save while the browser runs
+    browser.infos.clear(); // the browser is gone: no target info
+    const saved = registry.snapshotState(); // the save on shutdown
+    assert.deepEqual(Object.values(saved.spaces[0].tabUrls), [
+      "https://a.test/list",
+    ]);
+    const restarted = new TaskSpaceRegistry({ browser: fakeBrowser(), saved });
+    restarted.pruneTargets([]);
+    assert.ok(restarted.describe(1).lostTabs.includes("https://a.test/list"));
+  });
 });

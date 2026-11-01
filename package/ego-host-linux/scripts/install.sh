@@ -23,7 +23,7 @@
 set -eu
 
 REPO="${EGO_LITE_REPO:-phuzzled/ego-lite}"
-RELEASE_TAG="linux-v0.1.1"
+RELEASE_TAG="linux-v0.2.0"
 REF="${EGO_LITE_REF:-$RELEASE_TAG}"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/ego-lite"
 HOST_DIR="$DATA_DIR/host"

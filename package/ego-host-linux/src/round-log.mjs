@@ -8,17 +8,20 @@
  * set of short fields and drops the rest.
  */
 import {
-  appendFileSync,
+  closeSync,
+  constants,
   existsSync,
-  mkdirSync,
+  fchmodSync,
+  openSync,
   readFileSync,
   readdirSync,
   renameSync,
   statSync,
+  writeSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
-import { stateDir } from "./paths.mjs";
+import { ensurePrivateDir, stateDir } from "./paths.mjs";
 
 export function roundsDir(env = process.env) {
   return join(stateDir(env), "rounds");
@@ -103,11 +106,25 @@ export class RoundLog {
 
   #write(file, entry) {
     try {
-      mkdirSync(this.#dir, { recursive: true, mode: 0o700 });
+      ensurePrivateDir(dirname(file));
       if (existsSync(file) && statSync(file).size > this.#maxBytes) {
         renameSync(file, `${file}.1`);
       }
-      appendFileSync(file, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+      // Never follow a symbolic link, and keep an older loose file private.
+      const fd = openSync(
+        file,
+        constants.O_WRONLY |
+          constants.O_APPEND |
+          constants.O_CREAT |
+          constants.O_NOFOLLOW,
+        0o600,
+      );
+      try {
+        fchmodSync(fd, 0o600);
+        writeSync(fd, `${JSON.stringify(entry)}\n`);
+      } finally {
+        closeSync(fd);
+      }
     } catch {
       // Logging must never break a round.
     }

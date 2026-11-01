@@ -8,7 +8,12 @@ import {
 import { proxyServer } from "./test-support.mjs";
 
 /** Bindings on a fake daemon: `answers[method](params)` gives each reply. */
-async function bindings({ answers = {}, hello = {}, onFrame } = {}) {
+async function bindings({
+  answers = {},
+  hello = {},
+  onFrame,
+  handOffViewer,
+} = {}) {
   const server = await proxyServer(onFrame);
   const calls = [];
   const control = {
@@ -23,6 +28,7 @@ async function bindings({ answers = {}, hello = {}, onFrame } = {}) {
   const ego = await createEgoBindings({
     control,
     hello: { spaces: [], ...hello },
+    handOffViewer,
   });
   return {
     ego,
@@ -160,6 +166,28 @@ describe("handOffTaskSpace", () => {
       },
     );
     assert.match(stderr[0], /no viewer could start: The viewer needs x11vnc/);
+  });
+
+  it("with handOffViewer false issues no viewer token and prints nothing", async () => {
+    const { ego, calls, close } = await bindings({
+      hello: { headless: false, display: "virtual" },
+      answers: { handOffTaskSpace: "3 has been handed off to the user." },
+      handOffViewer: false,
+    });
+    try {
+      ego.useTaskSpace(3);
+      const { result, stderr } = await captureStderr(() =>
+        ego.handOffTaskSpace(),
+      );
+      assert.equal(result, "3 has been handed off to the user.");
+      assert.deepEqual(stderr, []);
+      assert.equal(
+        calls.some((c) => c.method === "startViewer"),
+        false,
+      );
+    } finally {
+      close();
+    }
   });
 
   it("relay keeps control and returns the capture paths", async () => {

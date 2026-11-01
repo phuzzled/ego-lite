@@ -88,7 +88,16 @@ export class SecretStore {
       if (error.code === "ENOENT") return {};
       throw error;
     }
-    const data = JSON.parse(text);
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // JSON.parse quotes part of the text in its message: that could be a
+      // secret value, so it is never passed on.
+      throw new Error(
+        `${this.#file} is not valid JSON. Move it away (mv ${this.#file} ${this.#file}.bad) and store the secrets again with: ego-browser secret set <name> --origin <https://site>`,
+      );
+    }
     return data && typeof data.secrets === "object" ? data.secrets : {};
   }
 

@@ -5,8 +5,10 @@
  */
 import { spawn as spawnProcess, execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
+
+import { ensurePrivateDir, writeAtomic } from "./paths.mjs";
 
 const FAMILY_WILD = 0xffff;
 
@@ -78,7 +80,7 @@ export async function startVirtualDisplay({
       { error_code: "EGO_DISPLAY_UNAVAILABLE" },
     );
   }
-  mkdirSync(runDir, { recursive: true, mode: 0o700 });
+  ensurePrivateDir(runDir);
   const xauthority = join(runDir, "Xauthority");
   let lastError = "no free display number";
   let start = 90;
@@ -86,9 +88,7 @@ export async function startVirtualDisplay({
     const number = freeDisplay(start);
     if (number === null) break;
     start = number + 1;
-    writeFileSync(xauthority, xauthEntry(number, randomBytes(16)), {
-      mode: 0o600,
-    });
+    writeAtomic(xauthority, xauthEntry(number, randomBytes(16)));
     const child = spawn(
       xvfb,
       [

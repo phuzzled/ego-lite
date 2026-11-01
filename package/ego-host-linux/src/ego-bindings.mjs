@@ -54,8 +54,16 @@ const UNLOGGED = new Set(["useTaskSpace", "getHostCapabilities", "logEvent"]);
  * @param {object} options
  * @param {import("./control-channel.mjs").ControlClient} options.control
  * @param {{ spaces: object[], round?: string, display?: string, headless?: boolean }} options.hello
+ * @param {boolean} [options.handOffViewer]  false: handOffTaskSpace() starts
+ *   no viewer and prints no link. The MCP server issues its own link and
+ *   returns it to the client; a second one-time token would cancel the link
+ *   printed here, and stderr never reaches the agent anyway.
  */
-export async function createEgoBindings({ control, hello }) {
+export async function createEgoBindings({
+  control,
+  hello,
+  handOffViewer = true,
+}) {
   const raw = new CdpRouter({
     initial: await connectBrowser(control, hello),
     connect: (browser) => connectBrowser(control, hello, browser),
@@ -242,6 +250,7 @@ export async function createEgoBindings({ control, hello }) {
       }
       const result = await taskCall("handOffTaskSpace");
       if (isEgoError(result)) return result;
+      if (!handOffViewer) return result;
       if (hello.display === "virtual") {
         const viewer = await call("startViewer", { spaceId: selected }).catch(
           (error) => egoError(error.message, "EGO_VIEWER_UNAVAILABLE"),

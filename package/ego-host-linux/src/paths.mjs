@@ -1,8 +1,18 @@
+import {
+  chmodSync,
+  closeSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  renameSync,
+  rmSync,
+  writeSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const HOST_VERSION = "0.1.1-linux";
+export const HOST_VERSION = "0.2.0-linux";
 
 const HOME = homedir();
 
@@ -62,4 +72,36 @@ export function debugSdkPath(env = process.env) {
 
 export function bundledSdkPath() {
   return join(HOST_ROOT, "sdk", "index.js");
+}
+
+/**
+ * Create `dir` (0700) and tighten it to 0700 when it already exists with a
+ * looser mode and belongs to this user. mkdirSync's mode only applies to a
+ * new directory, so a pre-existing 0755 or 0777 state dir would stay open.
+ */
+export function ensurePrivateDir(dir) {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const stat = lstatSync(dir);
+  if (!stat.isDirectory()) throw new Error(`${dir} is not a directory`);
+  if (stat.uid === process.getuid?.() && (stat.mode & 0o077) !== 0) {
+    chmodSync(dir, 0o700);
+  }
+}
+
+/**
+ * Write `text` to `file` atomically with mode 0600. The temp file is created
+ * fresh (O_EXCL), so a leftover or planted temp file or symbolic link is
+ * never followed, and never reused with its old mode.
+ */
+export function writeAtomic(file, text) {
+  ensurePrivateDir(dirname(file));
+  const temp = `${file}.${process.pid}.tmp`;
+  rmSync(temp, { force: true });
+  const fd = openSync(temp, "wx", 0o600);
+  try {
+    writeSync(fd, text);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(temp, file);
 }

@@ -38,13 +38,12 @@ the output was cut off: save it to a file and read the file in parts.
 If `ego-browser` is not found, install it. On Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/phuzzled/ego-lite/main/package/ego-host-linux/scripts/install.sh | EGO_LITE_REF=main sh
+curl -fsSL https://raw.githubusercontent.com/phuzzled/ego-lite/linux-v0.2.0/package/ego-host-linux/scripts/install.sh | sh
 ```
 
-Without `EGO_LITE_REF=main` you get the pinned release `linux-v0.1.1`. It is
-older than the one-shot commands, the MCP server, profiles, secrets and
-helpers such as `page.read()`. The checksum and troubleshooting are in
-`skills/ego-browser/references/install.md`.
+This installs the pinned release `linux-v0.2.0`. Each release's checksum is
+printed by the installer and listed in the release notes. Install options and
+troubleshooting are in `skills/ego-browser/references/install.md`.
 
 On macOS and Windows, the user installs the ego lite app from
 https://lite.ego.app/. Sections marked (Linux) are about the Linux host.
@@ -651,7 +650,7 @@ ego-browser logs -n 20    # recent actions, timings and error codes
 | `[ego-browser:lint] ...`                                        | Fix that line of your script, then rerun.                                                                                |
 | `ego-browser: command not found`                                | Install (section 2).                                                                                                     |
 | `Unknown command: skill`                                        | The app is too old. Ask the user to run `ego-browser upgrade`.                                                           |
-| `Unknown command: read` (Linux)                                 | The host is `linux-v0.1.1`. Reinstall with `EGO_LITE_REF=main` (section 2).                                              |
+| `Unknown command: read` (Linux)                                 | The host is older than `linux-v0.2.0`. Run the installer again (section 2).                                              |
 | `SyntaxError: await is only valid...`                           | The shell broke the script. Use a `.mjs` file. Do not wrap it in an async function.                                      |
 | `Cannot use import statement outside a module`                  | Use `await import("node:...")` instead of `import ... from`.                                                             |
 | `Identifier 'wait' has already been declared`                   | That name is a helper. Rename your variable (section 8).                                                                 |

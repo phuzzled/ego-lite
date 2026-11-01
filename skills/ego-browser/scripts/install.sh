@@ -14,7 +14,7 @@ EGO_BROWSER_HELPER_NAME="ego-browser"
 
 # Linux has no ego lite app; the open-source Linux host is built from source.
 LINUX_REPO="${EGO_LITE_REPO:-phuzzled/ego-lite}"
-LINUX_REF="${EGO_LITE_REF:-linux-v0.1.1}"
+LINUX_REF="${EGO_LITE_REF:-linux-v0.2.0}"
 
 # Temporary directories created when mounting the DMG; cleaned up on exit.
 TEMP_DIR=""
