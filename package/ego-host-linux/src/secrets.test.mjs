@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -49,6 +55,23 @@ describe("SecretStore", () => {
       /one line/,
     );
     assert.throws(() => secrets.set("x", "abcd", []), /--origin/);
+  });
+
+  it("reports a corrupt store with a hint and without its text", () => {
+    const secrets = store();
+    secrets.set("site", "hunter22", ["https://a.test"]);
+    writeFileSync(
+      secrets.file,
+      '{"version":1,"secrets":{"site":{"value":hunter22-LEAK}}}',
+    );
+    assert.throws(
+      () => secrets.list(),
+      (error) => {
+        assert.doesNotMatch(error.message, /hunter22/);
+        assert.match(error.message, /is not valid JSON\. Move it away/);
+        return true;
+      },
+    );
   });
 
   it("tightens a store file that others can read", () => {
