@@ -53,7 +53,13 @@ function fakePage({
     inflightRequests() {
       return requests
         .filter((request) => request.start <= now && now < request.end)
-        .map((request) => ({ type: request.type, startedAt: request.start }));
+        .map((request) => ({
+          type: request.type,
+          startedAt: request.start,
+          ...(request.respondedAt !== undefined && now >= request.respondedAt
+            ? { responded: true }
+            : {}),
+        }));
     },
     now: () => now,
     async sleep(ms) {
@@ -117,6 +123,55 @@ test("content rendered after a slow fetch, with background polling, settles once
     `settled after the rows plus a quiet window: ${result.waitedMs}`,
   );
   assert.equal(result.mutationsSeen, 3);
+});
+
+test("an answered request whose body the page never reads is not pending", async () => {
+  const page = fakePage({
+    requests: [
+      // Answered at 300 ms, but loadingFinished never comes.
+      { type: "Fetch", start: 0, respondedAt: 300, end: Infinity },
+    ],
+  });
+  const result = await waitForSettledInPage(page.services, "session:page", {
+    timeout: 3_000,
+  });
+  assert.equal(result.settled, true);
+  assert.equal(result.pendingRequests, 0);
+  assert(
+    result.waitedMs < 700,
+    `answered requests do not hold the page: ${result.waitedMs}`,
+  );
+});
+
+test("a probe that times out at the deadline keeps the last real reason", async () => {
+  let now = 0;
+  const services = {
+    async cdp(_method, _params, _sessionId, timeoutMs) {
+      if (timeoutMs < 50)
+        throw new Error("CDP request timed out: Runtime.evaluate");
+      return {
+        result: {
+          value: {
+            __egoSettleProbe: true,
+            url: "https://example.test/",
+            readyState: "complete",
+            quietMs: 0,
+            mutations: 1,
+            ageMs: 900,
+          },
+        },
+      };
+    },
+    now: () => now,
+    async sleep(ms) {
+      now += ms;
+    },
+  };
+  const result = await waitForSettledInPage(services, "session:page", {
+    timeout: 1_030,
+  });
+  assert.equal(result.settled, false);
+  assert.equal(result.reason, "dom still changing");
 });
 
 test("a long poll older than five seconds does not block settling", async () => {

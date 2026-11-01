@@ -6659,15 +6659,47 @@ test("waitForResponse arms before the action and resolves with the parsed body",
     const network = responseServices(fixture, {
       "req-2": { body: '{"items":["a","b"]}', base64Encoded: false },
     });
-    const task = taskForRound(fixture, "round-a", network.overrides);
-    const page = await openTestPage(task, "https://example.test/first");
+    const listenersAtInput = [];
+    let page;
+    // Make the waiter's own Page lookup slow, so without the arm barrier the
+    // click would reach the page before the waiter subscribed.
+    const store = new PageLedgerStore({ rootDir: fixture.rootDir });
+    let delayNextLookup = false;
+    const ledger = new Proxy(store, {
+      get(target, property) {
+        const value = Reflect.get(target, property, target);
+        if (property !== "getPage") {
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return async (...args) => {
+          if (delayNextLookup) {
+            delayNextLookup = false;
+            await new Promise((resolve) => setTimeout(resolve, 30));
+          }
+          return value.apply(target, args);
+        };
+      },
+    });
+    const task = taskForRound(fixture, "round-a", {
+      ...network.overrides,
+      ledger,
+      async cdp(method, params, ...rest) {
+        if (method === "Input.dispatchMouseEvent") {
+          listenersAtInput.push(network.listenerCount(page.targetId));
+        }
+        return network.overrides.cdp(method, params, ...rest);
+      },
+    });
+    page = await openTestPage(task, "https://example.test/first");
 
+    delayNextLookup = true;
     const pending = page.waitForResponse(/\/api\/items/);
     await page.click("#ready");
-    // Wait for the waiter to arm, then let the click's request answer.
-    while (network.listenerCount(page.targetId) === 0) {
-      await new Promise((resolve) => setImmediate(resolve));
-    }
+    assert(listenersAtInput.length > 0, "the click sent input");
+    assert(
+      listenersAtInput.every((count) => count === 1),
+      `the waiter listens before the click reaches the page: ${listenersAtInput}`,
+    );
     network.respond(page.targetId, "req-1", "https://example.test/api/other");
     network.respond(
       page.targetId,

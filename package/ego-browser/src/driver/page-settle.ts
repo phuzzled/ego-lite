@@ -4,9 +4,11 @@
  * `goto()` returns at `load`, and `networkidle` is not a content signal: a page
  * that renders after a slow fetch looks idle too early, and a page that polls
  * never looks idle. A page is settled here when its document has loaded, its
- * DOM has not changed for a quiet window, no fetch/XHR it started is still in
- * flight (long polls, WebSocket and EventSource are ignored), and, when asked,
- * a selector has enough matches.
+ * DOM has not changed for a quiet window, no fetch/XHR it started is still
+ * waiting for its answer (long polls, WebSocket and EventSource are ignored),
+ * and, when asked, a selector has enough matches. A request counts until its
+ * response headers arrive, not until loadingFinished: Chromium never finishes
+ * a body the page does not read.
  *
  * The DOM signal is a MutationObserver that the first probe installs in the
  * page under a Symbol key, so later probes and snapshots share it. Everything
@@ -58,7 +60,7 @@ export type PageSettleServices = {
   ): Promise<void>;
   inflightRequests?(
     sessionIds: string[],
-  ): Array<{ type?: string; startedAt: number }>;
+  ): Array<{ type?: string; startedAt: number; responded?: boolean }>;
   now(): number;
   sleep(ms: number): Promise<void>;
 };
@@ -135,21 +137,22 @@ export async function probePageState(
   }
 }
 
-/** Count fetch/XHR requests in flight, ignoring long polls. */
+/** Count fetch/XHR requests still waiting for an answer, ignoring long polls. */
 export function pendingDataRequests(
   services: PageSettleServices,
   sessionIds: string[],
 ): number | undefined {
   if (typeof services.inflightRequests !== "function") return undefined;
   const now = services.now();
-  return services
-    .inflightRequests(sessionIds)
-    .filter(
-      (request) =>
-        request.type !== undefined &&
-        DATA_REQUEST_TYPES.has(request.type) &&
-        now - request.startedAt < LONG_POLL_MS,
-    ).length;
+  return services.inflightRequests(sessionIds).filter(
+    (request) =>
+      request.type !== undefined &&
+      DATA_REQUEST_TYPES.has(request.type) &&
+      // Only a request still waiting for its answer holds the page back:
+      // Chromium never finishes a body the page does not read.
+      request.responded !== true &&
+      now - request.startedAt < LONG_POLL_MS,
+  ).length;
 }
 
 /**
@@ -228,7 +231,8 @@ export async function waitForSettledInPage(
       } else {
         return result(true);
       }
-    } else {
+    } else if (readyState === undefined) {
+      // Keep the last real reason when only a late probe failed.
       reason = "the document is being replaced";
     }
     const remaining = deadline - services.now();

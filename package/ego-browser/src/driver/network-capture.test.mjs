@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  BODY_GRACE_MS,
   compileResponseMatcher,
   ResponseCollector,
 } from "../../dist/src/driver/network-capture.js";
@@ -252,4 +253,32 @@ test("a throwing predicate is reported and does not break the stream", async () 
   assert.equal(errors.length, 1);
   assert(errors[0] instanceof TypeError);
   assert.deepEqual(await collector.stop(), []);
+});
+
+test("a body the page never reads is tried after a grace period", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const services = bodyServices({
+    unread: { body: '{"late":true}', base64Encoded: false },
+    missing: new Error("No data found for resource with given identifier"),
+  });
+  const seen = [];
+  const collector = new ResponseCollector(
+    services,
+    SESSION,
+    { match: "/api/", onResponse: (response) => seen.push(response) },
+    "test",
+  );
+  load(collector, "unread", { finish: false });
+  load(collector, "missing", { finish: false });
+  t.mock.timers.tick(BODY_GRACE_MS - 1);
+  assert.deepEqual(services.reads, [], "the grace period has not passed");
+  t.mock.timers.tick(1);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(services.reads, ["unread", "missing"]);
+  assert.deepEqual(seen[0].json, { late: true });
+  assert.match(
+    seen[1].bodyOmitted,
+    /^the body did not finish loading; the page may never read it \(No data found/,
+  );
+  assert.equal((await collector.stop()).length, 2);
 });

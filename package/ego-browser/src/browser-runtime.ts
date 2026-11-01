@@ -190,6 +190,7 @@ function targetState(targetId) {
           loaderId?: string;
           type?: string;
           startedAt?: number;
+          responded?: boolean;
         }
       >(),
       ignoredFaviconRequestIds: new Set<string>(),
@@ -949,8 +950,11 @@ export function networkActivity(sessionIds: string[]): {
  */
 export function inflightRequests(
   sessionIds: string[],
-): Array<{ type?: string; startedAt: number }> {
-  const requests = new Map<string, { type?: string; startedAt: number }>();
+): Array<{ type?: string; startedAt: number; responded?: boolean }> {
+  const requests = new Map<
+    string,
+    { type?: string; startedAt: number; responded?: boolean }
+  >();
   for (const sessionId of new Set(sessionIds)) {
     const targetId = sessionTargets.get(sessionId);
     const target = targetId ? targetStates.get(targetId) : undefined;
@@ -959,6 +963,7 @@ export function inflightRequests(
       requests.set(request.requestId, {
         ...(request.type ? { type: request.type } : {}),
         startedAt: request.startedAt ?? target.lastNetworkActivityAt,
+        ...(request.responded ? { responded: true } : {}),
       });
     }
   }
@@ -1333,6 +1338,18 @@ function recordNetworkEvent(targetId: string, target, data): void {
       startedAt: state.now(),
     });
     target.lastNetworkActivityAt = state.now();
+    return;
+  }
+  if (data.method === "Network.responseReceived") {
+    // The server has answered; the body may still be streaming, or never be
+    // read by the page. Network idle still waits for loadingFinished.
+    const rootTargetId = pageRootTargetId(targetId);
+    for (const pageTargetId of pageTreeTargetIds(rootTargetId)) {
+      const request = targetStates
+        .get(pageTargetId)
+        ?.inflightNetworkRequests.get(requestId);
+      if (request) request.responded = true;
+    }
     return;
   }
   if (

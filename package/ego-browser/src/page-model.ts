@@ -1678,6 +1678,8 @@ class Page {
   #pendingFileChooser?: PendingFileChooser;
   #pendingDownload?: PendingDownload;
   #activeDownload?: Promise<void>;
+  /** Response waiters still subscribing; later Page calls wait for them. */
+  readonly #responseArms = new Set<Promise<unknown>>();
 
   constructor(
     task: TaskSpace,
@@ -1931,17 +1933,23 @@ class Page {
         ),
       );
     }, timeoutMs);
+    // Register the subscription before returning, so the action the caller
+    // runs next waits in #resolve() until this waiter is listening.
+    const arm = this.#followResponses({
+      match: matcher,
+      ...(options.maxBodyBytes === undefined
+        ? {}
+        : { maxBodyBytes: options.maxBodyBytes }),
+      onResponse: (response) => settle.resolve(response),
+      onMatchError: (error) => settle.reject(error),
+    });
+    this.#responseArms.add(arm);
+    const disarm = () => this.#responseArms.delete(arm);
+    arm.then(disarm, disarm);
     return (async () => {
       let unsubscribe: (() => void) | undefined;
       try {
-        unsubscribe = await this.#followResponses({
-          match: matcher,
-          ...(options.maxBodyBytes === undefined
-            ? {}
-            : { maxBodyBytes: options.maxBodyBytes }),
-          onResponse: (response) => settle.resolve(response),
-          onMatchError: (error) => settle.reject(error),
-        });
+        unsubscribe = await arm;
         return await outcome;
       } finally {
         if (timer) clearTimeout(timer);
@@ -1970,7 +1978,7 @@ class Page {
     options: ConstructorParameters<typeof ResponseCollector>[2],
     created?: (collector: ResponseCollector) => void,
   ): Promise<() => void> {
-    const page = await this.#resolve();
+    const page = await this.#resolveEntry();
     return this.#services.gate.withPage(page, async ({ sessionId }) => {
       const apiName = created
         ? "page.captureResponses"
@@ -2782,6 +2790,15 @@ class Page {
   }
 
   async #resolve(): Promise<PageTarget> {
+    // A response waiter armed just before this call must be listening before
+    // the action it watches can send its request.
+    if (this.#responseArms.size > 0) {
+      await Promise.allSettled([...this.#responseArms]);
+    }
+    return this.#resolveEntry();
+  }
+
+  async #resolveEntry(): Promise<PageTarget> {
     const entry = await this.#services.ledger
       .getPage(this.spaceId, this.label)
       .catch(async (error) => {

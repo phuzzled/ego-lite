@@ -62,6 +62,7 @@ type CollectorServices = {
 type PendingResponse = {
   response: CapturedResponse;
   order: number;
+  graceTimer?: ReturnType<typeof setTimeout>;
 };
 
 export const DEFAULT_MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -70,6 +71,12 @@ export const DEFAULT_MAX_BODIES = 50;
 /** Responses kept by one capture; later matches are counted but dropped. */
 const MAX_RESPONSES = 1_000;
 const BODY_TIMEOUT_MS = 10_000;
+/**
+ * Chromium never sends loadingFinished for a body the page does not read.
+ * After this long without it, try to read the body anyway so a waiter still
+ * resolves with the status and headers.
+ */
+export const BODY_GRACE_MS = 1_500;
 const DATA_RESOURCE_TYPES = new Set(["Fetch", "XHR"]);
 const TEXT_MIME =
   /json|text\/|javascript|xml|csv|graphql|x-www-form-urlencoded/i;
@@ -170,6 +177,7 @@ export class ResponseCollector {
         const pending = this.#pending.get(requestId);
         if (!pending) return;
         this.#pending.delete(requestId);
+        clearTimeout(pending.graceTimer);
         pending.response.bodyOmitted = `loading failed: ${params.errorText || "unknown error"}`;
         this.#complete(pending);
         return;
@@ -192,6 +200,7 @@ export class ResponseCollector {
     // Responses whose loading never finished keep their metadata.
     for (const [requestId, pending] of this.#pending) {
       this.#pending.delete(requestId);
+      clearTimeout(pending.graceTimer);
       pending.response.bodyOmitted ??= "loading had not finished";
       this.#done.push(pending);
     }
@@ -218,7 +227,7 @@ export class ResponseCollector {
     }
     if (!matched) return;
     if (this.#order >= MAX_RESPONSES) return;
-    this.#pending.set(requestId, {
+    const pending: PendingResponse = {
       order: this.#order++,
       response: {
         ...info,
@@ -228,13 +237,21 @@ export class ResponseCollector {
           raw.fromDiskCache || raw.fromPrefetchCache || raw.fromServiceWorker,
         ),
       },
-    });
+    };
+    pending.graceTimer = setTimeout(() => {
+      if (this.#pending.get(requestId) === pending && !this.#stopped) {
+        this.#finish(requestId, Number.NaN, true);
+      }
+    }, BODY_GRACE_MS);
+    pending.graceTimer.unref?.();
+    this.#pending.set(requestId, pending);
   }
 
-  #finish(requestId: string, encodedLength: number): void {
+  #finish(requestId: string, encodedLength: number, unfinished = false): void {
     const pending = this.#pending.get(requestId);
     if (!pending) return;
     this.#pending.delete(requestId);
+    clearTimeout(pending.graceTimer);
     const { response } = pending;
     if (response.status === 204 || response.status === 304) {
       this.#complete(pending);
@@ -247,7 +264,7 @@ export class ResponseCollector {
       return;
     }
     this.#bodies += 1;
-    const read = this.#readBody(requestId, pending).finally(() => {
+    const read = this.#readBody(requestId, pending, unfinished).finally(() => {
       this.#bodyReads.delete(read);
     });
     this.#bodyReads.add(read);
@@ -272,7 +289,11 @@ export class ResponseCollector {
     return undefined;
   }
 
-  async #readBody(requestId: string, pending: PendingResponse): Promise<void> {
+  async #readBody(
+    requestId: string,
+    pending: PendingResponse,
+    unfinished: boolean,
+  ): Promise<void> {
     const { response } = pending;
     try {
       const result = await this.#services.cdp(
@@ -296,7 +317,10 @@ export class ResponseCollector {
         Object.assign(response, decodeBody(bytes.toString("utf8"), response));
       }
     } catch (error) {
-      response.bodyOmitted = `body unavailable: ${error instanceof Error ? error.message : String(error)}`;
+      const message = error instanceof Error ? error.message : String(error);
+      response.bodyOmitted = unfinished
+        ? `the body did not finish loading; the page may never read it (${message})`
+        : `body unavailable: ${message}`;
     }
     this.#complete(pending);
   }

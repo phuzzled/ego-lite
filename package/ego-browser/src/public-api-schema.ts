@@ -364,7 +364,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
     returns:
       'Promise<{ settled, waitedMs, mutationsSeen, pendingRequests, readyState?, matches?, reason? }> // reason is set when settled is false, such as "dom still changing"',
     summary:
-      "Wait until a client-rendered Page has drawn: the document has loaded, the DOM has not changed for quietMs, no fetch/XHR it started is pending (long polls, WebSocket and EventSource are ignored), and until matches at least minCount elements. Does not throw on timeout; check settled. A content wait (waitForSelector) is still best when you know the selector.",
+      "Wait until a client-rendered Page has drawn: the document has loaded, the DOM has not changed for quietMs, no fetch/XHR it started is still waiting for its answer (long polls, WebSocket and EventSource are ignored), and until matches at least minCount elements. Does not throw on timeout; check settled. A content wait (waitForSelector) is still best when you know the selector.",
     options: {
       timeout: option(
         "positiveMilliseconds",
