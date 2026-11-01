@@ -6660,6 +6660,51 @@ test("snapshot leaves the stats out when the page cannot be probed", async () =>
   });
 });
 
+test("a failed snapshot or stats probe still removes the observer", async () => {
+  await withFixture(async (fixture) => {
+    const { probes, overrides } = settleProbeServices(fixture);
+    let failSnapshot = true;
+    const task = taskForRound(fixture, "round-a", {
+      ...overrides,
+      async snapshot(options) {
+        if (failSnapshot) throw new Error("native snapshot failed");
+        return fixture.services.snapshot(options);
+      },
+    });
+    const page = await openTestPage(task, "https://example.test/first");
+    await assert.rejects(() => page.snapshot(), /native snapshot failed/);
+    assert.deepEqual(probes, ["light", "release"], "the error path releases");
+
+    // An unknown subtree root fails before the native snapshot runs.
+    probes.length = 0;
+    failSnapshot = false;
+    await assert.rejects(
+      () => page.snapshot({ scope: "subtree", root: "@999" }),
+      /Unknown ref|ref/,
+    );
+    assert.deepEqual(probes, ["light", "release"]);
+
+    // A stats probe that does not answer falls back to an explicit release.
+    probes.length = 0;
+    const silentStats = taskForRound(fixture, "round-a", {
+      async cdp(method, params, sessionId, timeoutMs) {
+        if (
+          method === "Runtime.evaluate" &&
+          String(params.expression).includes("innerText") &&
+          String(params.expression).includes("egoBrowser.settle")
+        ) {
+          probes.push("full");
+          throw new Error("CDP request timed out: Runtime.evaluate");
+        }
+        return overrides.cdp(method, params, sessionId, timeoutMs);
+      },
+    });
+    const quiet = await openTestPage(silentStats, "https://example.test/first");
+    assert.match(await quiet.snapshot(), /snapshot:/);
+    assert.deepEqual(probes, ["light", "full", "release"]);
+  });
+});
+
 test("snapshot settle waits for the page before the snapshot", async () => {
   await withFixture(async (fixture) => {
     const { probes, overrides } = settleProbeServices(fixture, {
