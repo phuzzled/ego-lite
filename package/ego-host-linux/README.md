@@ -5,7 +5,7 @@ open-source `ego-browser` SDK the same contract on Linux, on top of stock
 Chrome or Chromium:
 
 - `bin/ego-browser.mjs` — the `ego-browser` CLI: `nodejs`, `skill`, `start`,
-  `stop`, `status`, `spaces`, `close <id...>`, `close --all`, `upgrade`. Loads the SDK in the same order as the app:
+  `stop`, `status`, `spaces`, `close <id...>`, `close --all`, `close --force`, `upgrade`. Loads the SDK in the same order as the app:
   `--sdk-path`, then `~/.config/ego-lite/debug/index.js`, then the bundled SDK.
 - `src/daemon.mjs` — one background process per user. It starts the browser,
   keeps the task-space registry (`~/.local/state/ego-lite/spaces.json`) and

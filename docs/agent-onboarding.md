@@ -291,7 +291,13 @@ ego-browser close --all  # close every space the agent controls
 ```
 
 `close --all` never closes a space that the user owns or controls. After a
-failed run, the CLI names any task space that run left open.
+failed run, the CLI names any task space that run left open. A space handed
+off in a headless browser stays with the user, who cannot see it; close it
+with `ego-browser close --force <id>` once the user agrees.
+
+Tabs do not survive `ego-browser stop` or a browser restart. The task space
+stays, but its Pages are gone; the next run says which URLs were open. Open a
+new Page with `task.newPage()` and go there again.
 
 - **No screen = headless.** With no `DISPLAY` or `WAYLAND_DISPLAY`, Chrome runs
   with no window. The user cannot see or click it, so a hand-off cannot work

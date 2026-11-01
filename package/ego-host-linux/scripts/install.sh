@@ -105,7 +105,7 @@ install_host() {
 	mkdir -p "$staged"
 	cp -R "$root/package/ego-host-linux/bin" "$root/package/ego-host-linux/src" \
 		"$root/package/ego-host-linux/package.json" "$staged/"
-	rm -f "$staged"/src/*.test.mjs
+	rm -f "$staged"/src/*.test.mjs "$staged"/src/test-support.mjs
 	cp -R "$root/package/ego-browser/dist/out" "$staged/sdk"
 	chmod +x "$staged/bin/ego-browser.mjs"
 
