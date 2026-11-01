@@ -12,6 +12,10 @@ APP_PATH="/Applications/$APP_BUNDLE_NAME"
 USER_APP_PATH="$HOME/Applications/$APP_BUNDLE_NAME"
 EGO_BROWSER_HELPER_NAME="ego-browser"
 
+# Linux has no ego lite app; the open-source Linux host is built from source.
+LINUX_REPO="${EGO_LITE_REPO:-phuzzled/ego-lite}"
+LINUX_REF="${EGO_LITE_REF:-main}"
+
 # Temporary directories created when mounting the DMG; cleaned up on exit.
 TEMP_DIR=""
 MOUNT_DIR=""
@@ -212,8 +216,24 @@ install_ego_lite() {
 	die "cannot find $APP_NAME app or pkg in mounted DMG"
 }
 
+install_linux() {
+	require_command curl
+	temp_base_dir=${TMPDIR:-/tmp}
+	TEMP_DIR=$(mktemp -d "${temp_base_dir%/}/ego-lite-install.XXXXXX")
+	installer="$TEMP_DIR/install-linux.sh"
+	url="https://raw.githubusercontent.com/$LINUX_REPO/$LINUX_REF/package/ego-host-linux/scripts/install.sh"
+	log "Downloading the ego lite Linux installer from $url ..."
+	curl -fL --retry 3 --output "$installer" "$url" ||
+		die "failed to download the Linux installer from $url"
+	EGO_LITE_REPO="$LINUX_REPO" EGO_LITE_REF="$LINUX_REF" sh "$installer"
+}
+
 main() {
-	[ "$(uname -s)" = "Darwin" ] || die "this script only supports macOS; on Windows and other platforms install from https://lite.ego.app/"
+	if [ "$(uname -s)" = "Linux" ]; then
+		install_linux
+		return
+	fi
+	[ "$(uname -s)" = "Darwin" ] || die "this script supports macOS and Linux; on Windows install from https://lite.ego.app/"
 
 	# Install first if not present; otherwise use the ego-browser bundled inside the app.
 	installed_app_path=$(find_ego_lite_app || true)

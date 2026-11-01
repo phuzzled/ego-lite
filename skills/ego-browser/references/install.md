@@ -18,7 +18,7 @@ If `upgrade` is also an unknown command, reinstall with the steps below. Then co
 
 ## Install on macOS
 
-The install script lives at `scripts/install.sh` in this skill and supports macOS only. It will:
+The install script lives at `scripts/install.sh` in this skill and supports macOS and Linux. On macOS it will:
 
 - Download the ego lite installer (a DMG) for your CPU architecture (arm64 / x64).
 - Install `ego lite.app` to `/Applications` (falling back to `~/Applications` when needed).
@@ -34,6 +34,24 @@ sh skills/ego-browser/scripts/install.sh
 After installing, the script opens the ego lite app directly. If ego lite is already installed, the script skips the download and opens the app directly.
 
 After the script opens the ego lite app, the user completes the first-run onboarding in the app. Onboarding registers the `ego-browser` command on the PATH, usually under `~/.local/bin`.
+
+## Install on Linux
+
+There is no ego lite app for Linux. On Linux the same script installs the open-source Linux host from `package/ego-host-linux` in this repository. It needs Node.js 22 or newer and npm. It will:
+
+- Download the source, build the ego-browser SDK, and install the host to `~/.local/share/ego-lite/host`.
+- Link the `ego-browser` command into `~/.local/bin`.
+- Use Google Chrome or Chromium when installed (not the snap package); otherwise download Chrome for Testing.
+- Install the agent Skill to `~/.agents/skills/ego-browser` when it is not there yet.
+- Start the ego lite daemon, which owns the browser.
+
+Ask the user for approval, then run:
+
+```bash
+sh skills/ego-browser/scripts/install.sh
+```
+
+There is no onboarding step on Linux. Continue with "After installing: confirm `ego-browser` is available". On a server without a display, the browser runs headless. Run `ego-browser status` to see the browser and task spaces, and `ego-browser stop` to close the browser.
 
 ## Install on Windows
 
@@ -103,7 +121,9 @@ Once the environment is ready, return to the user's original task: run `ego-brow
 
 ## Troubleshooting
 
-- **Not macOS**: `scripts/install.sh` supports macOS only (`uname -s` is `Darwin`). On Windows and other platforms, have the user download and install from the ego lite website at https://lite.ego.app/.
+- **Not macOS or Linux**: `scripts/install.sh` supports macOS and Linux only. On Windows, have the user download and install from the ego lite website at https://lite.ego.app/.
+- **Linux: Node.js too old**: install Node.js 22 or newer, then rerun the script.
+- **Linux: browser does not start**: read `~/.local/state/ego-lite/daemon.log`. Chrome for Testing may need system libraries; the installer prints the `apt-get` line. Set `EGO_LITE_CHROME` to use another Chromium binary.
 - **Download failed**: the script retries 3 times automatically; if it still fails, it's usually a network issue — have the user check their network and retry.
 - **Gatekeeper still blocks it (macOS)**: the script already tries to strip quarantine; if the first launch is still blocked, have the user allow ego lite manually under System Settings → Privacy & Security.
 - **SmartScreen blocks the installer (Windows)**: have the user choose "More info" and then "Run anyway" in the SmartScreen dialog.

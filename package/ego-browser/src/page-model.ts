@@ -352,6 +352,7 @@ type PageModelServices = {
   withTemporaryClipboardText<T>(
     content: PageClipboardContent,
     action: () => Promise<T>,
+    sessionId?: string,
   ): Promise<T>;
   snapshot(options?: SnapshotOptions): Promise<any>;
   screenshot(
@@ -741,7 +742,23 @@ const baseDefaultServices: Omit<PageModelServices, "ledger" | "pageBudget"> = {
     if (typeof ego.setAgentTaskState !== "function") return;
     await invokeEgo("page.mouse.label", () => ego.setAgentTaskState(state));
   },
-  withTemporaryClipboardText,
+  withTemporaryClipboardText(content, action, sessionId) {
+    return withTemporaryClipboardText(content, action, {
+      page:
+        sessionId === undefined
+          ? undefined
+          : {
+              async cdp(method, params = {}) {
+                const response = await browserCdp(method, params, sessionId);
+                return response?.result || {};
+              },
+              async browserCdp(method, params = {}) {
+                const response = await browserCdp(method, params);
+                return response?.result || {};
+              },
+            },
+    });
+  },
   snapshot: snapshotRaw,
   screenshot: captureScreenshotForSession,
   pendingDialog,

@@ -21,6 +21,14 @@ type ClipboardInput = string | ClipboardContent;
 
 type ClipboardTransactionOptions = {
   beginTransaction?: (content: ClipboardInput) => Promise<ClipboardTransaction>;
+  /** The Page that receives the paste; Linux uses the browser clipboard. */
+  page?: PageClipboardTarget;
+};
+
+/** CDP access for one Page session and for browser-level commands. */
+export type PageClipboardTarget = {
+  cdp(method: string, params?: Record<string, unknown>): Promise<any>;
+  browserCdp(method: string, params?: Record<string, unknown>): Promise<any>;
 };
 
 type ClipboardHostMessage = {
@@ -67,7 +75,9 @@ export async function withTemporaryClipboardText<T>(
 
   try {
     const beginTransaction =
-      options.beginTransaction ?? beginNativeClipboardTransaction;
+      options.beginTransaction ??
+      ((input: ClipboardInput) =>
+        beginNativeClipboardTransaction(input, process.platform, options.page));
     const transaction = await beginTransaction(content);
     let value!: T;
     let actionError: unknown;
@@ -114,15 +124,162 @@ export async function withTemporaryClipboardContent<T>(
 function beginNativeClipboardTransaction(
   input: ClipboardInput,
   platform: string = process.platform,
+  page?: PageClipboardTarget,
 ): Promise<ClipboardTransaction> {
   if (platform === "darwin") return beginDarwinClipboardTransaction(input);
   if (platform === "win32") return beginWin32ClipboardTransaction(input);
+  if (platform === "linux" && page) {
+    return beginBrowserClipboardTransaction(input, page);
+  }
   return Promise.reject(
     new Error(
-      "page.keyboard.paste requires macOS or Windows clipboard support; use page.keyboard.insertText() for plain text",
+      "page.keyboard.paste requires macOS, Windows or Linux clipboard support; use page.keyboard.insertText() for plain text",
     ),
   );
 }
+
+/**
+ * Linux has no clipboard tool on every system (X11, Wayland, headless), so
+ * use the browser's own clipboard through the Async Clipboard API in an
+ * isolated world. Chromium writes it to the system clipboard when there is
+ * one, with every format at once. Clipboard permissions are granted for the
+ * page origin only while the transaction runs, then returned to "prompt".
+ */
+export async function beginBrowserClipboardTransaction(
+  input: ClipboardInput,
+  page: PageClipboardTarget,
+): Promise<ClipboardTransaction> {
+  const content = typeof input === "string" ? { text: input } : input;
+  const { frameTree } = await page.cdp("Page.getFrameTree");
+  const { executionContextId } = await page.cdp("Page.createIsolatedWorld", {
+    frameId: frameTree.frame.id,
+    worldName: "ego-browser-clipboard",
+  });
+  const evaluate = async (expression: string) => {
+    const response = await page.cdp("Runtime.evaluate", {
+      expression,
+      contextId: executionContextId,
+      awaitPromise: true,
+      returnByValue: true,
+      userGesture: true,
+    });
+    if (response.exceptionDetails) {
+      throw new Error(
+        response.exceptionDetails.exception?.description ||
+          response.exceptionDetails.text ||
+          "browser clipboard script failed",
+      );
+    }
+    return response.result?.value;
+  };
+
+  const origin = await evaluate("location.origin");
+  const permissionOrigin =
+    typeof origin === "string" && origin !== "null" ? origin : undefined;
+  const setClipboardPermissions = async (setting: "granted" | "prompt") => {
+    if (!permissionOrigin) return;
+    for (const permission of [
+      { name: "clipboard-read" },
+      { name: "clipboard-write", allowWithoutSanitization: true },
+    ]) {
+      await page.browserCdp("Browser.setPermission", {
+        permission,
+        setting,
+        origin: permissionOrigin,
+      });
+    }
+  };
+
+  await setClipboardPermissions("granted");
+  await page.cdp("Emulation.setFocusEmulationEnabled", { enabled: true });
+  const release = async () => {
+    await page
+      .cdp("Emulation.setFocusEmulationEnabled", { enabled: false })
+      .catch(() => {});
+    await setClipboardPermissions("prompt").catch(() => {});
+  };
+
+  let saved: unknown;
+  try {
+    saved = await evaluate(BROWSER_CLIPBOARD_READ);
+    await evaluate(
+      `(${BROWSER_CLIPBOARD_WRITE})([${JSON.stringify({
+        "text/plain": content.text,
+        ...(content.html === undefined ? {} : { "text/html": content.html }),
+      })}])`,
+    );
+  } catch (error) {
+    await release();
+    throw new Error(
+      `could not prepare the browser clipboard: ${(error as Error).message}`,
+    );
+  }
+
+  let finished = false;
+  return {
+    async finish() {
+      if (finished) throw new Error("clipboard transaction already finished");
+      finished = true;
+      try {
+        const current = await evaluate(
+          "navigator.clipboard.readText().catch(() => null)",
+        );
+        if (current !== content.text) return "changed";
+        await evaluate(
+          `(${BROWSER_CLIPBOARD_WRITE})(${JSON.stringify(saved ?? [])})`,
+        );
+        return "restored";
+      } finally {
+        await release();
+      }
+    },
+  };
+}
+
+/** Read every clipboard item; binary formats travel as base64. */
+const BROWSER_CLIPBOARD_READ = `(async () => {
+  const items = await navigator.clipboard.read().catch(() => []);
+  const saved = [];
+  for (const item of items) {
+    const entry = {};
+    for (const type of item.types) {
+      const blob = await item.getType(type);
+      if (type.startsWith("text/")) {
+        entry[type] = await blob.text();
+      } else {
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        let binary = "";
+        for (const byte of bytes) binary += String.fromCharCode(byte);
+        entry[type] = { base64: btoa(binary) };
+      }
+    }
+    saved.push(entry);
+  }
+  return saved;
+})()`;
+
+/** Write saved or new items; an empty list clears the clipboard. */
+const BROWSER_CLIPBOARD_WRITE = `async (allEntries) => {
+  const entries = allEntries.filter((entry) => Object.keys(entry).length > 0);
+  if (entries.length === 0) {
+    await navigator.clipboard.writeText("");
+    return;
+  }
+  const items = entries.map((entry) => {
+    const parts = {};
+    for (const [type, value] of Object.entries(entry)) {
+      parts[type] =
+        typeof value === "string"
+          ? new Blob([value], { type })
+          : new Blob(
+              [Uint8Array.from(atob(value.base64), (c) => c.charCodeAt(0))],
+              { type },
+            );
+    }
+    return new ClipboardItem(parts);
+  });
+  await navigator.clipboard.write(items);
+}`;
 
 type ClipboardHost = {
   platformName: string;
@@ -668,6 +825,7 @@ const WIN32_CLIPBOARD_HOST_COMMAND = Buffer.from(
 ).toString("base64");
 
 export const __testing = {
+  beginBrowserClipboardTransaction,
   beginNativeClipboardTransaction,
   beginWin32ClipboardTransaction,
   windowsHtmlClipboardFormat,

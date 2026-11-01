@@ -9,6 +9,7 @@ export type PageKeyboardServices = {
   withTemporaryClipboardText<T>(
     content: PageClipboardContent,
     action: () => Promise<T>,
+    sessionId?: string,
   ): Promise<T>;
   platform?: string;
 };
@@ -147,8 +148,10 @@ export class PageKeyboardController {
   async paste(content: PageClipboardContent): Promise<unknown> {
     assertClipboardContent(content);
     return this.#runObserved((sessionId) =>
-      this.#services.withTemporaryClipboardText(content, () =>
-        this.pressInSession(sessionId, "ControlOrMeta+V"),
+      this.#services.withTemporaryClipboardText(
+        content,
+        () => this.pressInSession(sessionId, "ControlOrMeta+V"),
+        sessionId,
       ),
     );
   }

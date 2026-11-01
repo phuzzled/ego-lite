@@ -6,7 +6,8 @@ and installation instructions for that host.
 
 ## Requirements
 
-- macOS or Windows with ego lite installed and open
+- macOS or Windows with ego lite installed and open, or Linux with the
+  ego lite Linux host installed (`package/ego-host-linux`)
 - `ego-browser` available on the agent's `PATH`
 - An agent host that can read Skills and execute local shell commands
 

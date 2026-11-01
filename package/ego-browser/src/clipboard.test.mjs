@@ -173,9 +173,90 @@ test("clipboard transactions are serialized within one runtime", async () => {
 
 test("paste explains the supported clipboard platforms", async () => {
   await assert.rejects(
-    () => __testing.beginNativeClipboardTransaction("temporary", "linux"),
-    /requires macOS or Windows clipboard support.*insertText/,
+    () => __testing.beginNativeClipboardTransaction("temporary", "freebsd"),
+    /requires macOS, Windows or Linux clipboard support.*insertText/,
   );
+  await assert.rejects(
+    () => __testing.beginNativeClipboardTransaction("temporary", "linux"),
+    /requires macOS, Windows or Linux clipboard support/,
+    "Linux needs the target Page",
+  );
+});
+
+/** A Page whose isolated world runs the clipboard scripts against `state`. */
+function fakeClipboardPage(state, calls) {
+  return {
+    async cdp(method, params = {}) {
+      calls.push(method);
+      if (method === "Page.getFrameTree")
+        return { frameTree: { frame: { id: "F" } } };
+      if (method === "Page.createIsolatedWorld")
+        return { executionContextId: 9 };
+      if (method !== "Runtime.evaluate") return {};
+      assert.equal(params.contextId, 9);
+      const { expression } = params;
+      if (expression === "location.origin") {
+        return { result: { value: "http://127.0.0.1:8080" } };
+      }
+      if (expression.includes("navigator.clipboard.read()")) {
+        return { result: { value: structuredClone(state.items) } };
+      }
+      if (expression.includes("readText")) {
+        return { result: { value: state.items[0]?.["text/plain"] ?? null } };
+      }
+      const argument = expression.slice(expression.lastIndexOf("})(") + 3, -1);
+      state.items = JSON.parse(argument).filter(
+        (entry) => Object.keys(entry).length > 0,
+      );
+      return { result: {} };
+    },
+    async browserCdp(method, params) {
+      calls.push(`${method}:${params.permission.name}:${params.setting}`);
+      return {};
+    },
+  };
+}
+
+test("Linux browser clipboard writes every format and restores the original", async () => {
+  const state = { items: [{ "text/plain": "original" }, {}] };
+  const calls = [];
+  const page = fakeClipboardPage(state, calls);
+  const value = await withTemporaryClipboardContent(
+    { text: "Name\tStatus", html: "<b>Name</b>" },
+    async () => {
+      assert.deepEqual(state.items, [
+        { "text/plain": "Name\tStatus", "text/html": "<b>Name</b>" },
+      ]);
+      return "pasted";
+    },
+    {
+      beginTransaction: (content) =>
+        __testing.beginBrowserClipboardTransaction(content, page),
+    },
+  );
+  assert.equal(value, "pasted");
+  assert.deepEqual(state.items, [{ "text/plain": "original" }]);
+  assert.deepEqual(
+    calls.filter((call) => call.startsWith("Browser.")),
+    [
+      "Browser.setPermission:clipboard-read:granted",
+      "Browser.setPermission:clipboard-write:granted",
+      "Browser.setPermission:clipboard-read:prompt",
+      "Browser.setPermission:clipboard-write:prompt",
+    ],
+  );
+});
+
+test("Linux browser clipboard leaves a clipboard changed by someone else", async () => {
+  const state = { items: [] };
+  const page = fakeClipboardPage(state, []);
+  const transaction = await __testing.beginBrowserClipboardTransaction(
+    "temporary",
+    page,
+  );
+  state.items = [{ "text/plain": "user copy" }];
+  assert.equal(await transaction.finish(), "changed");
+  assert.deepEqual(state.items, [{ "text/plain": "user copy" }]);
 });
 
 test("Windows HTML clipboard offsets count UTF-8 bytes", () => {

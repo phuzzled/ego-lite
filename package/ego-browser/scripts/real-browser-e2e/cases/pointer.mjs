@@ -92,8 +92,12 @@ export function pointerCase() {
 
     cliLog(JSON.stringify({ pointerStep: "page wheel" }));
     await resetHome();
+    // Center the tall scroll area first: font metrics differ per platform, and
+    // without this the wheel point can land on #inner-scroll instead.
     const wheelPoint = await js(
-      "const rect = document.querySelector('#scroll-area').getBoundingClientRect();" +
+      "const area = document.querySelector('#scroll-area');" +
+        "area.scrollIntoView({ block: 'center', inline: 'nearest' });" +
+        "const rect = area.getBoundingClientRect();" +
         "return { x: Math.min(Math.max(rect.left + 20, 10), innerWidth - 10), y: Math.min(Math.max(rect.top + 20, 10), innerHeight - 10) };"
     );
     const beforeWheel = await pageInfo();
@@ -107,7 +111,9 @@ export function pointerCase() {
 
     await resetHome();
     const objectWheelPoint = await js(
-      "const rect = document.querySelector('#scroll-area').getBoundingClientRect();" +
+      "const area = document.querySelector('#scroll-area');" +
+        "area.scrollIntoView({ block: 'center', inline: 'nearest' });" +
+        "const rect = area.getBoundingClientRect();" +
         "return { x: Math.min(Math.max(rect.left + 30, 10), innerWidth - 10), y: Math.min(Math.max(rect.top + 30, 10), innerHeight - 10) };"
     );
     const beforeObjectWheel = await pageInfo();
