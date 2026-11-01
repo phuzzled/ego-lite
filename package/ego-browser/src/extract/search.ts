@@ -40,7 +40,35 @@ export type SearchResult = {
   blocked: SearchBlock[];
   /** True when an engine answered and said it found nothing. */
   noResults?: boolean;
+  /** Set when the results look unrelated to the query (a soft block). */
+  warning?: string;
 };
+
+/**
+ * A warning when no result mentions any word of the query. Engines that
+ * distrust a browser sometimes answer with unrelated results instead of a
+ * check; this says so instead of passing them off as an answer.
+ */
+export function relevanceWarning(
+  query: string,
+  results: Array<{ title: string; url: string; snippet: string }>,
+): string | undefined {
+  if (results.length === 0) return undefined;
+  const terms = query
+    .toLowerCase()
+    .replace(/\b[a-z]+:\S*/g, " ")
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((term) => term.length >= 3);
+  if (terms.length === 0) return undefined;
+  const related = results.some((result) => {
+    const text =
+      `${result.title} ${result.snippet} ${result.url}`.toLowerCase();
+    return terms.some((term) => text.includes(term));
+  });
+  return related
+    ? undefined
+    : "no result mentions any word of the query; the engine may be answering an automated browser with unrelated results. Check them, try another engine, or hand off to the user.";
+}
 
 export const SEARCH_ENGINES: readonly SearchEngine[] = [
   "bing",
@@ -64,7 +92,9 @@ export function searchUrl(engine: SearchEngine, query: string): string {
   const q = encodeURIComponent(query);
   switch (engine) {
     case "bing":
-      return `https://www.bing.com/search?q=${q}`;
+      // form=QBLH marks a typed query; without it Bing often answers a
+      // headless browser with unrelated or empty results.
+      return `https://www.bing.com/search?q=${q}&form=QBLH&setlang=en&cc=US`;
     case "duckduckgo":
       return `https://html.duckduckgo.com/html/?q=${q}`;
     case "google":

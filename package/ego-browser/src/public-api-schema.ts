@@ -560,7 +560,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
     name: "Page.search",
     signature: "await page.search(query, { engine?, max?, timeout? })",
     returns:
-      "Promise<{ engine, query, url?, results: [{ rank, title, url, snippet }], blocked: [{ engine, url, reason, hint }], noResults? }> // engine is null when every engine was blocked",
+      "Promise<{ engine, query, url?, results: [{ rank, title, url, snippet }], blocked: [{ engine, url, reason, hint }], noResults?, warning? }> // engine is null when every engine was blocked; warning when no result mentions the query",
     summary:
       "Search the web in this Page and read the results. An engine that shows a bot check or an unreadable page is listed in blocked, never returned as empty results; with engine auto the next engine is tried. Bing usually works from servers; Google and DuckDuckGo often block automated browsers. Never try to bypass a check.",
     options: {

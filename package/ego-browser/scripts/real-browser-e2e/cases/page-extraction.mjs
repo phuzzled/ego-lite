@@ -372,7 +372,7 @@ export function hostIdentityCase() {
     const { spawnSync } = await import("node:child_process");
     const origin = new URL(baseUrl).origin;
     const set = spawnSync(process.execPath, [process.argv[1], "secret", "set", "e2e-secret", "--origin", origin], {
-      input: "s3cret-value\n",
+      input: "s3cret-value\\n",
       encoding: "utf8",
     });
     assertEqual(set.status, 0, "the secret is stored: " + set.stderr);

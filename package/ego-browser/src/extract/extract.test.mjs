@@ -17,6 +17,7 @@ import {
 } from "../../dist/src/extract/tables.js";
 import {
   judgeSearchPage,
+  relevanceWarning,
   searchEngineOrder,
   searchUrl,
   unwrapResultUrl,
@@ -225,7 +226,7 @@ test("search tries engines in order and honors a configured first engine", () =>
   assert.deepEqual(searchEngineOrder("duckduckgo", "google"), ["duckduckgo"]);
   assert.equal(
     searchUrl("bing", "a b&c"),
-    "https://www.bing.com/search?q=a%20b%26c",
+    "https://www.bing.com/search?q=a%20b%26c&form=QBLH&setlang=en&cc=US",
   );
 });
 
@@ -320,4 +321,30 @@ test("isolated calls pass their argument as JSON", () => {
   assert.match(expression, /JSON\.parse/);
   // The expression evaluates to a Promise of the function's result.
   return eval(expression).then((value) => assert.equal(value, '"quoted"1'));
+});
+
+test("results that never mention the query are flagged", () => {
+  const unrelated = [
+    {
+      title: "Home of Gujarat Titans",
+      url: "https://t.test/",
+      snippet: "Cricket",
+    },
+  ];
+  assert.match(
+    relevanceWarning("site:developer.mozilla.org fetch api", unrelated),
+    /no result mentions any word of the query/,
+  );
+  assert.equal(
+    relevanceWarning("fetch api", [
+      { title: "Using the Fetch API", url: "https://m.test/", snippet: "" },
+    ]),
+    undefined,
+  );
+  assert.equal(
+    relevanceWarning("a b", unrelated),
+    undefined,
+    "no usable terms",
+  );
+  assert.equal(relevanceWarning("fetch", []), undefined);
 });

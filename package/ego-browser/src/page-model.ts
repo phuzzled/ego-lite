@@ -173,6 +173,7 @@ import {
 import {
   judgeSearchPage,
   parseSearchPage,
+  relevanceWarning,
   searchEngineOrder,
   searchUrl,
   BLOCK_HINT,
@@ -2879,6 +2880,10 @@ class Page {
           results: verdict.results,
           blocked,
           ...(verdict.noResults ? { noResults: true } : {}),
+          ...(() => {
+            const warning = relevanceWarning(query, verdict.results);
+            return warning ? { warning } : {};
+          })(),
         };
       }
       blocked.push(verdict.block);
