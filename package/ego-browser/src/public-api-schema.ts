@@ -490,7 +490,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
       "await page.fillSecret(target, secretName, { clear?, timeout? })",
     returns: "Promise<{ filled, secret, origin }> // never the value",
     summary:
-      "Type a secret the user stored with the host (ego-browser secret set) into a field: focuses target, then the host types the value only if this Page's origin is one the secret is registered for. The value never reaches the script, and snapshots redact it. Errors: EGO_SECRET_NOT_FOUND, EGO_SECRET_ORIGIN_MISMATCH, EGO_SECRET_NO_FIELD, EGO_SECRET_STORE_UNAVAILABLE; hosts without secrets throw EGO_UNSUPPORTED_ON_HOST.",
+      "Type a secret the user stored with the host (ego-browser secret set) into a field: focuses target, then the host types the value only if this Page's origin is one the secret is registered for. The value never reaches the script; snapshots, read(), tables() and structuredData() redact it (evaluate, cdp and screenshots do not). Errors: EGO_SECRET_NOT_FOUND, EGO_SECRET_ORIGIN_MISMATCH, EGO_SECRET_NO_FIELD, EGO_SECRET_STORE_UNAVAILABLE; hosts without secrets throw EGO_UNSUPPORTED_ON_HOST.",
     options: {
       clear: option("boolean", "Clear the field first; defaults to true."),
       timeout: actionTimeout,

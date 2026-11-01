@@ -7737,6 +7737,17 @@ test("page.fillSecret focuses the target, then the host types the secret", async
     assert.deepEqual(order, [
       ["fillSecret", "site-password", { targetId: page.targetId, clear: true }],
     ]);
+    assert(
+      fixture.calls.some(
+        ([kind, method, params]) =>
+          kind === "cdp" &&
+          method === "Runtime.evaluate" &&
+          String(params.expression).includes(
+            'setAttribute("data-ego-secret", "site-password")',
+          ),
+      ),
+      "the filled field is marked so extractors redact it",
+    );
     await page.fillSecret("#password", "site-password", { clear: false });
     assert.equal(order.at(-1)[2].clear, false);
     await assert.rejects(() => page.fillSecret("", "x"), TypeError);

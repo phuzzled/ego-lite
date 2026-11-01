@@ -28,7 +28,10 @@ import {
   CONSENT_RULES,
   REJECT_TEXT,
 } from "../../dist/src/extract/consent.js";
-import { isolatedCallExpression } from "../../dist/src/extract/isolated.js";
+import {
+  isolatedCallExpression,
+  redactFilledSecrets,
+} from "../../dist/src/extract/isolated.js";
 import { twoPagePdf } from "../../scripts/real-browser-e2e/extraction-fixture.mjs";
 
 /** A one-page PDF whose Type0 font maps two-byte codes through ToUnicode. */
@@ -364,4 +367,62 @@ test("results that never mention the query are flagged", () => {
 test("an engine that found nothing is reported as doubtful", () => {
   assert.match(noResultsWarning("bing"), /^bing says it found nothing/);
   assert.match(noResultsWarning("bing"), /try another engine/);
+});
+
+/** A tiny DOM stand-in: elements with attributes, a value or text. */
+function fakeElement({ attrs = {}, value, text = "", shadow } = {}) {
+  return {
+    hasAttribute: (name) => Object.hasOwn(attrs, name),
+    getAttribute: (name) => attrs[name] ?? null,
+    value,
+    textContent: text,
+    shadowRoot: shadow || null,
+  };
+}
+
+function fakeDocument(elements, flagged = true) {
+  return {
+    documentElement: fakeElement({
+      attrs: flagged ? { "data-ego-secrets": "" } : {},
+    }),
+    querySelectorAll: () => elements,
+  };
+}
+
+test("filled secrets are redacted from extractor results in the page", () => {
+  const input = fakeElement({
+    attrs: { "data-ego-secret": "site-password" },
+    value: "Zq9_secret*value",
+  });
+  const editor = fakeElement({
+    attrs: { "data-ego-secret": "note" },
+    text: "plain   secret text",
+  });
+  const shadowField = fakeElement({
+    attrs: { "data-ego-secret": "pin" },
+    value: "4242-9999",
+  });
+  const host = fakeElement({
+    shadow: { querySelectorAll: () => [shadowField] },
+  });
+  const doc = fakeDocument([input, editor, host]);
+  const result = {
+    markdown: "typed Zq9\\_secret\\*value and plain secret text and 4242-9999",
+    rows: [{ Value: "Zq9_secret*value" }],
+    title: "t Zq9_secret*value",
+    words: 7,
+  };
+  const redacted = redactFilledSecrets(result, doc);
+  assert.deepEqual(redacted, {
+    markdown: "typed [secret:site-password] and [secret:note] and [secret:pin]",
+    rows: [{ Value: "[secret:site-password]" }],
+    title: "t [secret:site-password]",
+    words: 7,
+  });
+});
+
+test("secret redaction is a no-op on a document without filled secrets", () => {
+  const result = { markdown: "nothing secret" };
+  assert.equal(redactFilledSecrets(result, fakeDocument([], false)), result);
+  assert.equal(redactFilledSecrets(result, undefined), result);
 });

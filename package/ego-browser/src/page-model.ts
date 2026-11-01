@@ -150,7 +150,11 @@ import {
   unsupportedOnHost,
   type HostCapabilities,
 } from "./host-capabilities.js";
-import { evaluateIsolated } from "./extract/isolated.js";
+import {
+  evaluateIsolated,
+  SECRET_DOCUMENT_ATTRIBUTE,
+  SECRET_FIELD_ATTRIBUTE,
+} from "./extract/isolated.js";
 import {
   DEFAULT_READ_MAX_CHARS,
   countWords,
@@ -2662,12 +2666,21 @@ class Page {
       throw wrapped;
     }
     const page = await this.#resolve();
-    return this.#services.gate.withPage(page, () =>
-      this.#services.fillSecret(name, {
+    return this.#services.gate.withPage(page, async ({ sessionId }) => {
+      const result = await this.#services.fillSecret(name, {
         targetId: page.targetId,
         clear: options.clear !== false,
-      }),
-    );
+      });
+      // Mark the field, so the extractors (read, tables, structuredData)
+      // redact its value in the page. Snapshots are redacted by the host.
+      await evaluateInSession(
+        this.#services,
+        sessionId,
+        markSecretFieldExpression(name),
+        false,
+      ).catch(() => undefined);
+      return result;
+    });
   }
 
   /** Run a browser-level call with this Page's space selected. */
@@ -5339,6 +5352,27 @@ function configuredPageBudget(): number {
 function tilePath(path: string, n: number): string {
   const match = /^(.*?)(\.[a-z0-9]+)?$/i.exec(path)!;
   return `${match[1]}-${n}${match[2] || ".png"}`;
+}
+
+/** Mark the focused field (through shadow roots and frames) as a secret. */
+function markSecretFieldExpression(name: string): string {
+  return `(() => {
+    let doc = document;
+    let active = doc.activeElement;
+    for (let depth = 0; active && depth < 32; depth += 1) {
+      if (active.shadowRoot && active.shadowRoot.activeElement) {
+        active = active.shadowRoot.activeElement;
+      } else if (active.contentDocument && active.contentDocument.activeElement) {
+        doc = active.contentDocument;
+        active = doc.activeElement;
+      } else break;
+    }
+    if (!active || active === doc.body) return false;
+    active.setAttribute(${JSON.stringify(SECRET_FIELD_ATTRIBUTE)}, ${JSON.stringify(name)});
+    doc.documentElement.setAttribute(${JSON.stringify(SECRET_DOCUMENT_ATTRIBUTE)}, "");
+    document.documentElement.setAttribute(${JSON.stringify(SECRET_DOCUMENT_ATTRIBUTE)}, "");
+    return true;
+  })()`;
 }
 
 /** A selector usable with querySelectorAll in the page, or undefined. */

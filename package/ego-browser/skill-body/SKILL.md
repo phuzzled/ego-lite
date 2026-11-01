@@ -409,7 +409,8 @@ above.
 
 On hosts with a secret store (Linux), the user stores a password once with
 `ego-browser secret set <name> --origin https://site`. Fill it by name; the
-value never reaches your script, and snapshots redact it:
+value never reaches your script, and snapshots, `read()`, `tables()` and
+`structuredData()` redact it (`evaluate()`, `cdp()` and screenshots do not):
 
 ```js
 await page.goto("https://the-internet.herokuapp.com/login");
