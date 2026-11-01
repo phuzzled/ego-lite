@@ -7628,6 +7628,37 @@ test("page.fillSecret focuses the target, then the host types the secret", async
   });
 });
 
+test("page.fillSecret on a non-focusable target says it is not a text field", async () => {
+  await withFixture(async (fixture) => {
+    let hostCalled = false;
+    const task = taskForRound(fixture, "round-a", {
+      hostCapabilities: () => ({ fillSecret: true }),
+      async fillSecret() {
+        hostCalled = true;
+        return { filled: true };
+      },
+    });
+    const page = await openTestPage(task, "https://example.test/login");
+    fixture.configureFocusResult({
+      error: "element is not focusable",
+      details: { tagName: "DIV", contentEditable: false, tabIndex: -1 },
+    });
+    await assert.rejects(
+      () => page.fillSecret("#password", "site-password"),
+      (error) => {
+        assert.match(
+          error.message,
+          /^page\.fillSecret: #password is not a text field: element is not focusable \(div/,
+        );
+        assert.doesNotMatch(error.message, /matched 0/);
+        assert.match(error.hint, /cannot take typed text/);
+        return true;
+      },
+    );
+    assert.equal(hostCalled, false, "the host never types into a non-field");
+  });
+});
+
 test("page.fillSecret reports host errors with a hint and needs host support", async () => {
   await withFixture(async (fixture) => {
     const previous = globalThis.ego;

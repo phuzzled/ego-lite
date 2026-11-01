@@ -2638,10 +2638,28 @@ class Page {
         "this host keeps no secrets; ask the user to type it after task.handOff()",
       );
     }
-    await this.focus(
-      target,
-      options.timeout === undefined ? {} : { timeout: options.timeout },
-    );
+    try {
+      await this.focus(
+        target,
+        options.timeout === undefined ? {} : { timeout: options.timeout },
+      );
+    } catch (error) {
+      if (!(error instanceof ElementResolutionError)) throw error;
+      // Name the real step that failed: the target was found but cannot
+      // take focus, or it was not found, or it cannot receive input.
+      const reason = error.message.replace(
+        /^page\.focus (?:failed|timed out after \d+ms): /,
+        "",
+      );
+      const wrapped = new ElementResolutionError(
+        /element is not focusable|multiple editable targets/.test(reason)
+          ? `page.fillSecret: ${target} is not a text field: ${reason}`
+          : `page.fillSecret: could not focus ${target}: ${reason}`,
+        error.kind,
+      );
+      (wrapped as Error & { cause?: unknown }).cause = error;
+      throw wrapped;
+    }
     const page = await this.#resolve();
     return this.#services.gate.withPage(page, () =>
       this.#services.fillSecret(name, {

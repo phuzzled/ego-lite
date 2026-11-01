@@ -364,6 +364,10 @@ const HINT_PATTERNS: ReadonlyArray<[RegExp, string]> = [
     "Use a ref from a fresh snapshot, add >> nth=N, or use a more exact loc=role: name.",
   ],
   [
+    /element is not focusable|multiple editable targets|is not a text field/,
+    "The element cannot take typed text. Target the input, textarea or contenteditable field itself: take a snapshot and use its ref or a loc= locator.",
+  ],
+  [
     /matched 0 elements|Element not found|none can receive input/,
     "Take a new snapshot; the page may have changed or not rendered yet. Then use a ref or a loc= locator from it.",
   ],
