@@ -9,6 +9,7 @@
  *   ego-browser gc | logs | view | relay | restore | service operations
  *   ego-browser profiles | cookies | secret                  identity: profiles, logins, secrets
  *   ego-browser read | shot | tables | snapshot | search     one-shot commands
+ *   ego-browser mcp                                          MCP server on stdio
  *   ego-browser upgrade                                      how to update ego lite
  */
 import { spawn } from "node:child_process";
@@ -40,8 +41,15 @@ import {
   spacesFile,
 } from "../src/paths.mjs";
 import {
+  DEFAULT_SPACE_TTL_MS,
+  DEFAULT_TOOL_TIMEOUT_MS,
+  McpServer,
+  runMcpStdio,
+} from "../src/mcp-server.mjs";
+import {
   ONE_SHOT_USAGE,
   UsageError,
+  parseDuration,
   parseOneShotArgs,
   runOneShot,
 } from "../src/oneshot.mjs";
@@ -89,6 +97,8 @@ Usage:
   ego-browser secret set <name> --origin <https://site> [--origin ...]
                                      store a secret (asks for it; or reads stdin)
   ego-browser secret list | remove <name>
+  ego-browser mcp [--profile <id>] [--timeout <2m>] [--ttl <30m>]
+                                     an MCP server on stdio (tools browser_*)
   ego-browser upgrade
 
 ${ONE_SHOT_USAGE}`;
@@ -143,6 +153,8 @@ async function main(argv) {
     case "snapshot":
     case "search":
       return oneShotCommand(command, rest);
+    case "mcp":
+      return mcpCommand(rest);
     case "upgrade":
       process.stdout.write(
         `Re-run the ego lite Linux installer to upgrade:\n  ${INSTALL_COMMAND}\n`,
@@ -239,6 +251,56 @@ async function oneShotCommand(command, args) {
       };
     },
   });
+}
+
+async function mcpCommand(args) {
+  const rest = [...args];
+  let profileId;
+  let toolTimeoutMs = DEFAULT_TOOL_TIMEOUT_MS;
+  let ttlMs = DEFAULT_SPACE_TTL_MS;
+  let sdkPathOption;
+  try {
+    profileId = takeOption(rest, "--profile");
+    const timeout = takeOption(rest, "--timeout");
+    if (timeout) toolTimeoutMs = parseDuration(timeout);
+    const ttl = takeOption(rest, "--ttl");
+    if (ttl) ttlMs = parseDuration(ttl, "--ttl", 24 * 3_600_000);
+    sdkPathOption = takeOption(rest, "--sdk-path");
+  } catch (error) {
+    process.stderr.write(`ego-browser mcp: ${error.message}\n`);
+    return 2;
+  }
+  if (rejectExtra(rest)) return 2;
+  const sdkPath = sdkPathOrNull(sdkPathOption);
+  if (!sdkPath) return 1;
+
+  // stdout carries the protocol only. Anything else that writes to it (a
+  // stray console.log, an SDK notice) goes to stderr instead.
+  const protocolWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk, ...rest) =>
+    process.stderr.write(chunk, ...rest);
+  const log = (line) => process.stderr.write(`[ego-browser mcp] ${line}\n`);
+
+  const server = new McpServer({
+    version: HOST_VERSION,
+    profileId,
+    toolTimeoutMs,
+    ttlMs,
+    log,
+    openSession: () => openSdkSession({ sdkPath, connect: connectWithHello }),
+  });
+  const transport = runMcpStdio(server, {
+    input: process.stdin,
+    write: (text) => protocolWrite(text),
+    log,
+    drainMs: toolTimeoutMs,
+  });
+  const onSignal = () => void transport.stop();
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"])
+    process.once(signal, onSignal);
+  process.stdout.on("error", onSignal);
+  await transport.done;
+  return 0;
 }
 
 async function runNodejs({ sdkPath, code, rest }) {
