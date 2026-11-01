@@ -105,7 +105,12 @@ async function execute(code: string, stdout: WritableLike) {
   const values = Object.values(context);
   let fn: (...args: unknown[]) => Promise<unknown>;
   try {
-    fn = new AsyncFunction(...names, `"use strict";\n${code}`);
+    // Helpers are parameters, so a top-level `const wait = ...` in the script
+    // would collide with them ("Identifier has already been declared"). The
+    // script body runs in an inner block instead: its declarations shadow the
+    // helpers, and scripts that use the helpers keep working. The block opens
+    // on the first line so runtime stack line numbers match the user's script.
+    fn = new AsyncFunction(...names, `"use strict"; {\n${code}\n}`);
   } catch (error) {
     flushSink(stdout, true);
     throw userScriptSyntaxError(code, error);

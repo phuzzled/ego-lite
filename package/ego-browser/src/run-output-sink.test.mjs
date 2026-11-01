@@ -403,3 +403,36 @@ test("a lint-disable first line silences the lint", async () => {
   assert.equal(result.exitCode, 0);
   assert.equal(result.stderr, "");
 });
+
+for (const name of [
+  "wait",
+  "click",
+  "snapshot",
+  "js",
+  "cdp",
+  "help",
+  "scroll",
+  "hover",
+  "console",
+]) {
+  test(`a top-level const named ${name} shadows the injected helper`, async () => {
+    const result = await runScript(
+      `const ${name} = 41;\nlet other = ${name} + 1;\ncliLog(other);`,
+    );
+    assert.equal(result.error, null, String(result.error?.stack));
+    assert.equal(result.stdout, "42\n");
+  });
+}
+
+test("scripts that use the helpers still see them next to their own declarations", async () => {
+  const result = await runScript(
+    `function wait() { return "mine"; }\ncliLog(wait(), typeof help, typeof taskSpace);`,
+  );
+  assert.equal(result.error, null, String(result.error?.stack));
+  assert.equal(result.stdout, "mine function function\n");
+});
+
+test("the inner block keeps runtime line numbers where they were (header offset 3)", async () => {
+  const result = await runScript(`const a = 1;\n\nnull.boom;`);
+  assert.match(String(result.error?.stack), /<anonymous>:6:/);
+});

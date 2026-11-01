@@ -63,10 +63,9 @@ switch to the `.mjs` file form.
 - The script runs in Node.js as the body of an async function. Top-level
   `await` works; a static `import` does not: write
   `const fs = await import("node:fs/promises")`.
-- Helpers are parameters of that function, so declaring one of their names
-  fails with `Identifier '...' has already been declared`. Do not name
-  variables `wait`, `click`, `hover`, `snapshot`, `scroll`, `js`, `cdp`, or
-  `help`.
+- Your own top-level declarations shadow helpers of the same name (`wait`,
+  `click`, `snapshot`, `js`, `help`, ...), so after `const wait = 5` the
+  `wait()` helper is not reachable in that script.
 - `window`, `document`, and DOM APIs exist only inside `page.evaluate()`.
 - Use absolute paths. The script does not run in your working directory and
   does not inherit your environment variables.
