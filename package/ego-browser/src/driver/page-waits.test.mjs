@@ -615,16 +615,21 @@ test("navigateInPage keeps an HTTP error even when the status probe uses the who
 
 test("navigateInPage retries once when the network changed during the load", async () => {
   const navigations = [];
+  const sleeps = [];
+  let now = 0;
   const services = {
     async cdp(method, params) {
       if (method === "Page.navigate") {
-        navigations.push(params.url);
+        navigations.push([params.url, now]);
         return { errorText: "net::ERR_NETWORK_CHANGED" };
       }
       throw new Error(`unexpected CDP method: ${method}`);
     },
-    now: () => 0,
-    async sleep() {},
+    now: () => now,
+    async sleep(ms) {
+      sleeps.push(ms);
+      now += ms;
+    },
   };
   await assert.rejects(
     navigateInPage(services, "session:page", "https://example.com/", {
@@ -634,9 +639,36 @@ test("navigateInPage retries once when the network changed during the load", asy
     { message: "page.goto failed: net::ERR_NETWORK_CHANGED" },
   );
   assert.deepEqual(navigations, [
-    "https://example.com/",
-    "https://example.com/",
+    ["https://example.com/", 0],
+    ["https://example.com/", 500],
   ]);
+  assert.deepEqual(sleeps, [500], "the retry waits a short backoff first");
+});
+
+test("the network-changed backoff never outlasts the navigation deadline", async () => {
+  let now = 0;
+  const sleeps = [];
+  const services = {
+    async cdp(method) {
+      if (method === "Page.navigate") {
+        now += 150;
+        return { errorText: "net::ERR_NETWORK_CHANGED" };
+      }
+      throw new Error(`unexpected CDP method: ${method}`);
+    },
+    now: () => now,
+    async sleep(ms) {
+      sleeps.push(ms);
+      now += ms;
+    },
+  };
+  await assert.rejects(
+    navigateInPage(services, "session:page", "https://example.com/", {
+      timeoutMs: 300,
+      waitUntil: "commit",
+    }),
+  );
+  assert.deepEqual(sleeps, [149]);
 });
 
 test("navigateInPage keeps other navigation errors unchanged", async () => {

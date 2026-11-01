@@ -481,6 +481,7 @@ function invalidURLGlobError(glob: string, reason: string): TypeError {
 }
 
 const NAVIGATION_ATTEMPTS = 2;
+const NAVIGATION_RETRY_BACKOFF_MS = 500;
 
 const HTTP_ERROR_NET_CODE = "net::ERR_HTTP_RESPONSE_CODE_FAILURE";
 /** How long goto waits for Chromium's error page to show the HTTP status. */
@@ -620,6 +621,13 @@ export async function navigateInPage(
       ) {
         break;
       }
+      // Give the new network a moment to settle; an immediate retry often
+      // fails the same way while the interface is still coming up.
+      const backoffMs = Math.min(
+        NAVIGATION_RETRY_BACKOFF_MS * attempt,
+        Math.max(0, deadline - services.now() - 1),
+      );
+      if (backoffMs > 0) await services.sleep(backoffMs);
     }
     if (navigation.errorText) {
       throw await navigationFailure(
