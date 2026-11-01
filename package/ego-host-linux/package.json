@@ -1,6 +1,6 @@
 {
   "name": "ego-host-linux",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Linux host for the ego-browser SDK: the ego-browser CLI, a browser daemon, and the globalThis.ego bindings on stock Chromium.",
   "type": "module",
   "bin": {

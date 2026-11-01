@@ -81,10 +81,10 @@ On first launch, ego lite asks one question, whether to migrate your Chrome data
 There is no ego lite app for Linux. Install the Linux host from [`package/ego-host-linux`](package/ego-host-linux/README.md). It needs Node.js 22+ and uses Chrome or Chromium, or downloads Chrome for Testing:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/phuzzled/ego-lite/main/package/ego-host-linux/scripts/install.sh | EGO_LITE_REF=main sh
+curl -fsSL https://raw.githubusercontent.com/phuzzled/ego-lite/linux-v0.2.0/package/ego-host-linux/scripts/install.sh | sh
 ```
 
-Without `EGO_LITE_REF=main` it installs the pinned release `linux-v0.1.1`, which predates the one-shot commands, the tool server for agents without a shell, profiles and secrets. [`skills/ego-browser/references/install.md`](skills/ego-browser/references/install.md) has the checksum and troubleshooting. Give your agent [`docs/agent-onboarding.md`](docs/agent-onboarding.md) as its brief: one-shot commands such as `ego-browser read <url>`, the MCP server (`ego-browser mcp`), and the scripting loop.
+It installs the pinned release `linux-v0.2.0`. Each release's checksum is printed by the installer and listed in the release notes. [`skills/ego-browser/references/install.md`](skills/ego-browser/references/install.md) has the install options and troubleshooting. Give your agent [`docs/agent-onboarding.md`](docs/agent-onboarding.md) as its brief: one-shot commands such as `ego-browser read <url>`, the MCP server (`ego-browser mcp`), and the scripting loop.
 
 ### 2. Try your first task
 

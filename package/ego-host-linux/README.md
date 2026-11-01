@@ -38,10 +38,16 @@ Needs Node.js 22+ and npm. Uses Google Chrome or Chromium (not the snap), or
 downloads Chrome for Testing.
 
 Without a checkout, the installer downloads the pinned release tag
-(`linux-v0.1.1`) and prints the SHA-256 of the source archive. Set
-`EGO_LITE_SHA256` to that value to make later installs stop on a mismatch.
-Set `EGO_LITE_REF=main` for the newest code. Chrome for Testing is the latest
-stable build at install time; it is not pinned.
+`linux-v0.2.0`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/phuzzled/ego-lite/linux-v0.2.0/package/ego-host-linux/scripts/install.sh | sh
+```
+
+Each release's checksum is printed by the installer and listed in the release
+notes. Set `EGO_LITE_SHA256` to it to make the install stop on a mismatch.
+Chrome for Testing is the latest stable build at install time; it is not
+pinned.
 
 Installer options:
 

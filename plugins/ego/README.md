@@ -15,8 +15,9 @@ and installation instructions for that host.
 
 There is no ego lite app for Linux. The Skill's `scripts/install.sh` installs
 the open-source Linux host from `package/ego-host-linux` instead: the pinned
-release `linux-v0.1.1` by default, or the newest code with `EGO_LITE_REF=main`.
-`skills/ego-browser/references/install.md` has the checksum, the one-shot
+release `linux-v0.2.0` by default. Each release's checksum is printed by the
+installer and listed in the release notes.
+`skills/ego-browser/references/install.md` has the install options, the one-shot
 commands (`ego-browser read <url>`, `search "<query>"`) and troubleshooting.
 `package/ego-host-linux/README.md` covers every host command, profiles,
 secrets, hand-off on a server and the service. `docs/agent-onboarding.md` is a
