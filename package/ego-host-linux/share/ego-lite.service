@@ -1,0 +1,15 @@
+[Unit]
+Description=ego lite browser daemon (ego-browser)
+Documentation=https://github.com/phuzzled/ego-lite/tree/main/package/ego-host-linux
+
+[Service]
+Type=simple
+ExecStart=@EXEC_START@
+@ENVIRONMENT@
+Restart=on-failure
+RestartSec=5
+@MEMORY_MAX@
+UMask=0077
+
+[Install]
+WantedBy=default.target
