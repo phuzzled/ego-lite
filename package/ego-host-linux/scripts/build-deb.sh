@@ -70,6 +70,11 @@ Description: browser for AI agents (ego-browser CLI and daemon for Linux)
  logs and resource limits. DevTools is a private pipe, not a port.
 EOF
 
+# mktemp -d makes the root 0700, and a strict umask (077) makes every copied
+# file private: dpkg-deb then refuses DEBIAN/, or the package installs
+# /usr/lib/ego-lite unreadable for other users. Set package modes explicitly.
+chmod -R u=rwX,go=rX "$stage"
+
 deb="$out_dir/ego-lite_${version}_all.deb"
 dpkg-deb --root-owner-group --build "$stage" "$deb" >/dev/null
 printf '%s\n' "$deb"
