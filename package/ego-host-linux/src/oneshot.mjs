@@ -9,7 +9,15 @@
  * Exit codes: 0 ok, 1 error, 2 usage, 3 blocked by a bot check, 4 HTTP
  * error, 5 timeout.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  writeSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -378,11 +386,14 @@ export const COMMANDS = {
 
   async shot(page, options, context) {
     const opened = await openPage(page, options.url, context);
+    // The default goes in a fresh 0700 folder: a shared, predictable
+    // /tmp/ego-browser-shots let other users read the screenshot or plant
+    // a symbolic link in its place.
+    if (options.out) refuseSymlink(options.out);
     const path =
       options.out ??
       join(
-        tmpdir(),
-        "ego-browser-shots",
+        mkdtempSync(join(tmpdir(), "ego-browser-shot-")),
         `${new URL(options.url).hostname}-${context.now()}.png`,
       );
     const saved = await page.screenshot({
@@ -423,7 +434,7 @@ export const COMMANDS = {
       mkdirSync(options.out, { recursive: true });
       const paths = tables.map((table) => {
         const file = join(options.out, `table-${table.index}.csv`);
-        writeFileSync(file, withNewline(table.csv ?? ""));
+        writeNoFollow(file, withNewline(table.csv ?? ""));
         return file;
       });
       return {
@@ -521,6 +532,44 @@ export const COMMANDS = {
 function withNewline(text) {
   const value = String(text ?? "");
   return value.endsWith("\n") || value === "" ? value : `${value}\n`;
+}
+
+/** Refuse to write through a symbolic link someone left at `path`. */
+function refuseSymlink(path) {
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch {
+    return;
+  }
+  if (stat.isSymbolicLink()) {
+    throw new UsageError(`${path} is a symbolic link; choose another path`);
+  }
+}
+
+/** Create or replace `file`, never following a symbolic link. */
+function writeNoFollow(file, text) {
+  let fd;
+  try {
+    fd = openSync(
+      file,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_TRUNC |
+        constants.O_NOFOLLOW,
+      0o644,
+    );
+  } catch (error) {
+    if (error.code === "ELOOP") {
+      throw new UsageError(`${file} is a symbolic link; choose another --out`);
+    }
+    throw error;
+  }
+  try {
+    writeSync(fd, text);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function oneLine(text) {

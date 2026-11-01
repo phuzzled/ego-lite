@@ -495,6 +495,51 @@ test("runOneShot tables --csv --out writes one file per table", async () => {
   }
 });
 
+test("runOneShot tables --out never writes through a symbolic link", async () => {
+  const { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } =
+    await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "oneshot-test-"));
+  try {
+    const victim = join(dir, "victim.txt");
+    writeFileSync(victim, "keep");
+    symlinkSync(victim, join(dir, "table-0.csv"));
+    const page = fakePage({
+      tables: async () => [
+        { index: 0, headers: ["a"], rows: [], rowCount: 0, csv: "a" },
+      ],
+    });
+    const { session } = fakeSession(page);
+    const io = streams();
+    const code = await runOneShot(
+      parseOneShotArgs("tables", ["https://a.test", "--csv", "--out", dir]),
+      { openSession: async () => session, ...io },
+    );
+    assert.notEqual(code, 0);
+    assert.match(io.err.join(""), /symbolic link/);
+    assert.equal(readFileSync(victim, "utf8"), "keep");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runOneShot shot saves to a private folder by default", async () => {
+  const { statSync } = await import("node:fs");
+  const { dirname } = await import("node:path");
+  const page = fakePage({});
+  const { session } = fakeSession(page);
+  const io = streams();
+  const code = await runOneShot(parseOneShotArgs("shot", ["https://a.test"]), {
+    openSession: async () => session,
+    ...io,
+  });
+  assert.equal(code, 0);
+  const saved = io.out.join("").trim();
+  assert.match(saved, /ego-browser-shot-[^/]+\/a\.test-\d+\.png$/);
+  assert.equal(statSync(dirname(saved)).mode & 0o777, 0o700);
+});
+
 test("runOneShot retries a navigation once after a network blip", async () => {
   let attempts = 0;
   const page = fakePage({
