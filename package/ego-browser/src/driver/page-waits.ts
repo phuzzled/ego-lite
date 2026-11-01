@@ -419,6 +419,15 @@ function invalidURLGlobError(glob: string, reason: string): TypeError {
   return new TypeError(`Invalid URL glob ${JSON.stringify(glob)}: ${reason}`);
 }
 
+/**
+ * Chromium reports an HTTP error status with an empty body only as this net
+ * error, without the status code. Page.navigate does not return the status.
+ */
+function navigationErrorHint(errorText: string): string {
+  if (errorText !== "net::ERR_HTTP_RESPONSE_CODE_FAILURE") return "";
+  return " (the server answered with an HTTP error status, 4xx or 5xx, and an empty body; Node.js fetch(url) shows the status, without the Page's cookies)";
+}
+
 /** Navigate one Page and wait for the selected state of this navigation. */
 export async function navigateInPage(
   services: PageWaitServices,
@@ -455,7 +464,9 @@ export async function navigateInPage(
     );
     navigation = response?.result || response || {};
     if (navigation.errorText) {
-      throw new Error(`page.goto failed: ${navigation.errorText}`);
+      throw new Error(
+        `page.goto failed: ${navigation.errorText}${navigationErrorHint(navigation.errorText)}`,
+      );
     }
     if (navigation.isDownload === true) {
       throw new Error("page.goto failed: navigation started a download");

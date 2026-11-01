@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  navigateInPage,
   waitForLoadStateInPage,
   waitForSelectorInPage,
   waitForURLInPage,
@@ -498,5 +499,46 @@ test("network-idle reports its public timeout when discovery exhausts the budget
         idleMs: 10,
       }),
     /page\.waitForLoadState\(networkidle\) timed out after 50ms/,
+  );
+});
+
+test("navigateInPage explains an HTTP error status with an empty body", async () => {
+  const services = {
+    async cdp(method) {
+      if (method === "Page.navigate") {
+        return {
+          frameId: "frame",
+          loaderId: "loader",
+          errorText: "net::ERR_HTTP_RESPONSE_CODE_FAILURE",
+        };
+      }
+      throw new Error(`unexpected CDP method: ${method}`);
+    },
+    now: () => 0,
+    async sleep() {},
+  };
+  await assert.rejects(
+    navigateInPage(services, "session:page", "https://example.com/404", {
+      timeoutMs: 5_000,
+      waitUntil: "load",
+    }),
+    /ERR_HTTP_RESPONSE_CODE_FAILURE \(the server answered with an HTTP error status, 4xx or 5xx, and an empty body/,
+  );
+});
+
+test("navigateInPage keeps other navigation errors unchanged", async () => {
+  const services = {
+    async cdp() {
+      return { errorText: "net::ERR_NAME_NOT_RESOLVED" };
+    },
+    now: () => 0,
+    async sleep() {},
+  };
+  await assert.rejects(
+    navigateInPage(services, "session:page", "https://nope.invalid", {
+      timeoutMs: 5_000,
+      waitUntil: "load",
+    }),
+    { message: "page.goto failed: net::ERR_NAME_NOT_RESOLVED" },
   );
 });
