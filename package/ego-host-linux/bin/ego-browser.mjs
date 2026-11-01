@@ -11,14 +11,13 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { ControlClient } from "../src/control-channel.mjs";
+import { connectRunningDaemon } from "../src/control-channel.mjs";
 import { createEgoBindings } from "../src/ego-bindings.mjs";
 import {
   HOST_VERSION,
   bundledSdkPath,
-  controlSocketPath,
   daemonLogFile,
   debugSdkPath,
 } from "../src/paths.mjs";
@@ -201,7 +200,7 @@ async function reportOpenSpaces(control, spacesBefore) {
 async function printSpaces() {
   let control;
   try {
-    control = await ControlClient.connect(controlSocketPath());
+    control = await connectRunningDaemon();
   } catch {
     process.stdout.write("ego lite daemon is not running\n");
     return 1;
@@ -236,7 +235,7 @@ async function closeSpaces(args) {
   }
   let control;
   try {
-    control = await ControlClient.connect(controlSocketPath());
+    control = await connectRunningDaemon();
   } catch {
     process.stdout.write("ego lite daemon is not running\n");
     return 1;
@@ -269,9 +268,8 @@ async function closeSpaces(args) {
 
 /** Connect to the daemon, starting it in the background when needed. */
 async function connectDaemon(timeoutMs = 40_000) {
-  const socketPath = controlSocketPath();
   try {
-    return await ControlClient.connect(socketPath);
+    return await connectRunningDaemon();
   } catch {
     // Not running yet.
   }
@@ -280,7 +278,7 @@ async function connectDaemon(timeoutMs = 40_000) {
   const log = openSync(logFile, "a");
   const child = spawn(
     process.execPath,
-    [new URL(import.meta.url).pathname, "daemon"],
+    [fileURLToPath(import.meta.url), "daemon"],
     { detached: true, stdio: ["ignore", log, log], env: process.env },
   );
   child.unref();
@@ -289,7 +287,7 @@ async function connectDaemon(timeoutMs = 40_000) {
   while (Date.now() < deadline) {
     await new Promise((done) => setTimeout(done, 200));
     try {
-      return await ControlClient.connect(socketPath);
+      return await connectRunningDaemon();
     } catch {
       // Exit code 0: another daemon won the start race; keep waiting for it.
       if (child.exitCode) break;
@@ -304,7 +302,7 @@ async function connectDaemon(timeoutMs = 40_000) {
 async function stopDaemon() {
   let control;
   try {
-    control = await ControlClient.connect(controlSocketPath());
+    control = await connectRunningDaemon();
   } catch {
     process.stdout.write("ego lite daemon is not running\n");
     return 0;
@@ -318,7 +316,7 @@ async function stopDaemon() {
 async function printStatus() {
   let control;
   try {
-    control = await ControlClient.connect(controlSocketPath());
+    control = await connectRunningDaemon();
   } catch {
     process.stdout.write("ego lite daemon is not running\n");
     return 1;

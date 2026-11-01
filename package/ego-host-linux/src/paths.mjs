@@ -38,6 +38,19 @@ export function spacesFile(env = process.env) {
   return join(stateDir(env), "spaces.json");
 }
 
+/**
+ * Lock and address of the running daemon. They sit with the profile's state,
+ * not with the socket: shells with different XDG_RUNTIME_DIR values compute
+ * different socket paths but share one browser profile.
+ */
+export function daemonLockFile(env = process.env) {
+  return join(stateDir(env), "daemon.lock");
+}
+
+export function daemonInfoFile(env = process.env) {
+  return join(stateDir(env), "daemon.json");
+}
+
 export function daemonLogFile(env = process.env) {
   return join(stateDir(env), "daemon.log");
 }

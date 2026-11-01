@@ -5,7 +5,34 @@
  *   response {"id":1,"result":...} or {"id":1,"error":"..."}
  *   push     {"event":"spaces","data":[...]}
  */
+import { readFileSync } from "node:fs";
 import { connect } from "node:net";
+
+import { controlSocketPath, daemonInfoFile } from "./paths.mjs";
+
+/**
+ * Connect to the running daemon. Its socket path depends on XDG_RUNTIME_DIR,
+ * which differs between shells, so fall back to the address it recorded.
+ */
+export async function connectRunningDaemon(env = process.env, timeoutMs) {
+  const primary = controlSocketPath(env);
+  try {
+    return await ControlClient.connect(primary, timeoutMs);
+  } catch (error) {
+    const recorded = recordedDaemonSocket(env);
+    if (!recorded || recorded === primary) throw error;
+    return ControlClient.connect(recorded, timeoutMs);
+  }
+}
+
+function recordedDaemonSocket(env) {
+  try {
+    const { socket } = JSON.parse(readFileSync(daemonInfoFile(env), "utf8"));
+    return typeof socket === "string" ? socket : null;
+  } catch {
+    return null;
+  }
+}
 
 export function encode(message) {
   return `${JSON.stringify(message)}\n`;

@@ -6,6 +6,7 @@ import { createServer } from "node:net";
 import {
   chmodSync,
   closeSync,
+  existsSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -17,8 +18,18 @@ import { dirname } from "node:path";
 
 import { launchBrowser } from "./browser-launcher.mjs";
 import { CdpConnection } from "./cdp-connection.mjs";
-import { ControlClient, encode, lineReader } from "./control-channel.mjs";
-import { HOST_VERSION, controlSocketPath, spacesFile } from "./paths.mjs";
+import {
+  connectRunningDaemon,
+  encode,
+  lineReader,
+} from "./control-channel.mjs";
+import {
+  HOST_VERSION,
+  controlSocketPath,
+  daemonInfoFile,
+  daemonLockFile,
+  spacesFile,
+} from "./paths.mjs";
 import { TaskSpaceRegistry } from "./task-spaces.mjs";
 
 /** Size of a new task-space window; small defaults push content off-screen. */
@@ -29,12 +40,14 @@ export async function runDaemon(env = process.env) {
   mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
   // Two CLI calls can start a daemon at the same time. Only one may own the
   // socket and the browser profile; the other leaves at once.
-  const lockFile = `${socketPath}.lock`;
+  const lockFile = daemonLockFile(env);
+  const infoFile = daemonInfoFile(env);
+  mkdirSync(dirname(lockFile), { recursive: true, mode: 0o700 });
   if (!acquireLock(lockFile)) {
     log("another daemon is running; exiting");
     return;
   }
-  if (await socketAnswers(socketPath)) {
+  if (await daemonAnswers(env)) {
     rmSync(lockFile, { force: true });
     log("another daemon is answering; exiting");
     return;
@@ -179,6 +192,7 @@ export async function runDaemon(env = process.env) {
     server.close();
     for (const socket of clients) socket.destroy();
     rmSync(socketPath, { force: true });
+    rmSync(infoFile, { force: true });
     rmSync(lockFile, { force: true });
     cdp.close();
     // A browser that stopped answering may ignore SIGTERM.
@@ -206,11 +220,15 @@ export async function runDaemon(env = process.env) {
     server.listen(socketPath, resolve);
   });
   chmodSync(socketPath, 0o600);
+  writeAtomic(
+    infoFile,
+    JSON.stringify({ pid: process.pid, socket: socketPath }),
+  );
   log(`listening on ${socketPath}`);
 }
 
 /** Create the lock file, or take it over when its owner process is gone. */
-function acquireLock(file) {
+export function acquireLock(file, isOwnerAlive = isDaemonProcess) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const fd = openSync(file, "wx", 0o600);
@@ -220,11 +238,27 @@ function acquireLock(file) {
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
       const owner = Number(readFileSync(file, "utf8").trim());
-      if (owner && owner !== process.pid && processAlive(owner)) return false;
+      if (owner && owner !== process.pid && isOwnerAlive(owner)) return false;
       rmSync(file, { force: true });
     }
   }
   return false;
+}
+
+/**
+ * True when pid is a live ego lite daemon. The lock outlives a reboot, and its
+ * pid can then belong to an unrelated process.
+ */
+export function isDaemonProcess(pid) {
+  if (!processAlive(pid)) return false;
+  let cmdline;
+  try {
+    cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8");
+  } catch {
+    // Without /proc, trust the pid.
+    return !existsSync("/proc/self");
+  }
+  return cmdline.split("\0").includes("daemon");
 }
 
 function processAlive(pid) {
@@ -236,9 +270,9 @@ function processAlive(pid) {
   }
 }
 
-async function socketAnswers(path) {
+async function daemonAnswers(env) {
   try {
-    const client = await ControlClient.connect(path, 1_000);
+    const client = await connectRunningDaemon(env, 1_000);
     client.close();
     return true;
   } catch {
@@ -274,13 +308,17 @@ function readSaved(file) {
 
 function writeSaved(file, state) {
   try {
-    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-    const temp = `${file}.${process.pid}.tmp`;
-    writeFileSync(temp, JSON.stringify(state, null, 2), { mode: 0o600 });
-    renameSync(temp, file);
+    writeAtomic(file, JSON.stringify(state, null, 2));
   } catch (error) {
     log(`cannot save task spaces: ${error.message}`);
   }
+}
+
+function writeAtomic(file, text) {
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  const temp = `${file}.${process.pid}.tmp`;
+  writeFileSync(temp, text, { mode: 0o600 });
+  renameSync(temp, file);
 }
 
 function log(message) {
