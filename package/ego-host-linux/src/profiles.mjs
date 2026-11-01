@@ -13,17 +13,11 @@
  * The list of named profiles is ~/.local/share/ego-lite/profiles.json (0600).
  * It is read on every call, so the CLI may change it while the daemon runs.
  */
-import {
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 
 import { egoError } from "./errors.mjs";
-import { dataDir, profileDir } from "./paths.mjs";
+import { dataDir, profileDir, writeAtomic } from "./paths.mjs";
 
 export const DEFAULT_PROFILE_ID = "Default";
 export const EPHEMERAL_PROFILE_ID = "ephemeral";
@@ -175,9 +169,4 @@ export class ProfileStore {
 }
 
 /** Write a 0600 file through a rename, in a 0700 folder. */
-export function writeAtomic(file, text) {
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-  const temp = `${file}.${process.pid}.tmp`;
-  writeFileSync(temp, text, { mode: 0o600 });
-  renameSync(temp, file);
-}
+export { writeAtomic };

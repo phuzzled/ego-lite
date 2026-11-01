@@ -1,9 +1,19 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
+import { writeAtomic } from "./paths.mjs";
 import { ProfileStore, profileIdProblem, profilesFile } from "./profiles.mjs";
 
 function store() {
@@ -91,5 +101,23 @@ describe("ProfileStore", () => {
       read: () => "{not json",
     });
     assert.equal(profiles.list().profiles.length, 2);
+  });
+});
+
+describe("writeAtomic", () => {
+  it("tightens a loose folder and ignores a planted temp link", () => {
+    const root = mkdtempSync(join(tmpdir(), "ego-lite-atomic-"));
+    const dir = join(root, "state");
+    mkdirSync(dir, { mode: 0o777 });
+    chmodSync(dir, 0o777);
+    const file = join(dir, "secrets.json");
+    const victim = join(root, "victim");
+    writeFileSync(victim, "keep");
+    symlinkSync(victim, `${file}.${process.pid}.tmp`);
+    writeAtomic(file, "{}");
+    assert.equal(readFileSync(victim, "utf8"), "keep");
+    assert.equal(readFileSync(file, "utf8"), "{}");
+    assert.equal(statSync(file).mode & 0o777, 0o600);
+    assert.equal(statSync(dir).mode & 0o777, 0o700);
   });
 });

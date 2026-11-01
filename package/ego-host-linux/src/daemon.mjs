@@ -18,9 +18,9 @@ import {
   closeSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
-  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -55,8 +55,10 @@ import {
   controlSocketPath,
   daemonInfoFile,
   daemonLockFile,
+  ensurePrivateDir,
   spacesFile,
   stateDir,
+  writeAtomic,
 } from "./paths.mjs";
 import { DEFAULT_PROFILE_ID, ProfileStore } from "./profiles.mjs";
 import { cached, processTreeMemoryMb } from "./resources.mjs";
@@ -102,12 +104,18 @@ export function displayMode(env = process.env) {
 
 export async function runDaemon(env = process.env) {
   const socketPath = controlSocketPath(env);
-  mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
+  // The default socket folder is ours alone; a custom EGO_LITE_SOCKET may sit
+  // in a folder the user shares on purpose, so only create that one.
+  if (env.EGO_LITE_SOCKET) {
+    mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
+  } else {
+    ensurePrivateDir(dirname(socketPath));
+  }
   // Two CLI calls can start a daemon at the same time. Only one may own the
   // socket and the browser profile; the other leaves at once.
   const lockFile = daemonLockFile(env);
   const infoFile = daemonInfoFile(env);
-  mkdirSync(dirname(lockFile), { recursive: true, mode: 0o700 });
+  ensurePrivateDir(dirname(lockFile));
   if (!acquireLock(lockFile)) {
     log("another daemon is running; exiting");
     return;
@@ -463,8 +471,10 @@ export async function runDaemon(env = process.env) {
         "EGO_WEB_CONTENTS_UNAVAILABLE",
       );
     }
-    const dir = join(stateDir(env), "relay", `${id}-${Date.now()}`);
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const relayDir = join(stateDir(env), "relay");
+    ensurePrivateDir(relayDir);
+    // A fresh 0700 folder, never one that already exists.
+    const dir = mkdtempSync(join(relayDir, `${id}-${Date.now()}-`));
     const owner = cdpOf(targetId);
     const { sessionId } = await owner.send("Target.attachToTarget", {
       targetId,
@@ -887,10 +897,17 @@ export async function runDaemon(env = process.env) {
   process.on("SIGTERM", () => shutdown(0));
   process.on("SIGINT", () => shutdown(0));
 
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(socketPath, resolve);
-  });
+  // Create the socket 0600 from the start: a chmod after listen() leaves a
+  // window in which it has the umask's mode.
+  const umask = process.umask(0o077);
+  try {
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, resolve);
+    });
+  } finally {
+    process.umask(umask);
+  }
   chmodSync(socketPath, 0o600);
   writeAtomic(
     infoFile,
@@ -987,13 +1004,6 @@ function writeSaved(file, state) {
   } catch (error) {
     log(`cannot save task spaces: ${error.message}`);
   }
-}
-
-function writeAtomic(file, text) {
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-  const temp = `${file}.${process.pid}.tmp`;
-  writeFileSync(temp, text, { mode: 0o600 });
-  renameSync(temp, file);
 }
 
 function log(message) {

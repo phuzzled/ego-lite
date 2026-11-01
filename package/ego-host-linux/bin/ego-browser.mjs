@@ -13,7 +13,14 @@
  *   ego-browser upgrade                                      how to update ego lite
  */
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import {
+  constants,
+  existsSync,
+  fchmodSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -38,6 +45,7 @@ import {
   bundledSdkPath,
   daemonLogFile,
   debugSdkPath,
+  ensurePrivateDir,
   spacesFile,
 } from "../src/paths.mjs";
 import {
@@ -663,7 +671,7 @@ function takeOption(args, name) {
 /** Every value of a repeatable option. */
 function takeOptions(args, name) {
   const values = [];
-  for (let value; (value = takeOption(args, name)) !== undefined; ) {
+  for (let value; (value = takeOption(args, name)) !== undefined;) {
     values.push(value);
   }
   return values;
@@ -1113,8 +1121,17 @@ async function connectDaemon(env = process.env, timeoutMs = 40_000) {
     // Not running yet.
   }
   const logFile = daemonLogFile(env);
-  mkdirSync(dirname(logFile), { recursive: true, mode: 0o700 });
-  const log = openSync(logFile, "a", 0o600);
+  ensurePrivateDir(dirname(logFile));
+  // daemon.log may hold page errors: keep it 0600 and never follow a link.
+  const log = openSync(
+    logFile,
+    constants.O_WRONLY |
+      constants.O_APPEND |
+      constants.O_CREAT |
+      constants.O_NOFOLLOW,
+    0o600,
+  );
+  fchmodSync(log, 0o600);
   const child = spawn(
     process.execPath,
     [fileURLToPath(import.meta.url), "daemon"],
