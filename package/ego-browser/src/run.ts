@@ -5,9 +5,11 @@ import {
 } from "node:process";
 import { parse } from "acorn";
 
+import { attachHint } from "./ego-errors.js";
 import { formatCliLogValue } from "./format.js";
 import * as helpers from "./helpers.js";
 import { addPageContextHint } from "./page-context-guard.js";
+import { formatLintWarnings, lintScript } from "./script-lint.js";
 import {
   bufferOutput,
   createRoundConsole,
@@ -81,6 +83,11 @@ export async function runMain(options: RunMainOptions = {}) {
     return 2;
   }
 
+  // Lint warnings go to stderr before the round starts, so they never mix
+  // with the script's own output and never block it.
+  const warnings = formatLintWarnings(lintScript(code));
+  if (warnings) write(stderr, warnings);
+
   await execute(code, stdout);
   return 0;
 }
@@ -109,7 +116,8 @@ async function execute(code: string, stdout: WritableLike) {
     // The thrown Error surfaces the hard-stop message on its own, so flush as a thrown
     // completion (drop the buffer, stay silent) and let it propagate.
     flushSink(stdout, true);
-    throw addPageContextHint(error);
+    // The hint lines follow the stack, which is what the CLI and hosts print.
+    throw attachHint(addPageContextHint(error));
   }
   flushSink(stdout, false);
 }

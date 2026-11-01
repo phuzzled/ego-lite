@@ -7,6 +7,12 @@ import {
   ElementResolutionError,
   resolveElementObjectId,
 } from "../element-resolver.js";
+import {
+  errorHint,
+  httpErrorHint,
+  withHint,
+  type HintedError,
+} from "../ego-errors.js";
 import { type RefMap } from "../ref-map.js";
 
 const SELECTOR_POLL_INTERVAL_MS = 100;
@@ -206,6 +212,61 @@ export async function waitForSelectorInPage(
   );
 }
 
+/**
+ * Count the elements a selector matches right now: 0 while it matches
+ * nothing, 1 when it resolves uniquely, and the reported count when strict
+ * resolution finds several. Used by waitForSettled({ until, minCount }).
+ */
+export async function countSelectorMatchesInPage(
+  services: Pick<PageWaitServices, "cdp">,
+  sessionId: string,
+  refMap: RefMap,
+  selector: string,
+  iframeSessions: Map<string, string>,
+): Promise<number> {
+  if (typeof selector !== "string" || selector.length === 0) {
+    throw new TypeError("page.waitForSettled until must be a non-empty string");
+  }
+  let resolved: { objectId: string; sessionId: string } | undefined;
+  try {
+    resolved = await resolveElementObjectId(
+      cdpAdapter(services as PageWaitServices),
+      sessionId,
+      refMap,
+      selector,
+      iframeSessions,
+      { strict: true },
+    );
+    return 1;
+  } catch (error) {
+    if (error instanceof ElementResolutionError) {
+      const match =
+        /matched (\d+) (?:elements|frame contexts)(?!, but none)/.exec(
+          error.message,
+        );
+      if (match) return Number(match[1]);
+      if (error.kind === "transient") return 0;
+    }
+    if (
+      isTransientElementError(error) ||
+      isTransientNavigationContextError(error)
+    ) {
+      return 0;
+    }
+    throw error;
+  } finally {
+    if (resolved?.objectId) {
+      await services
+        .cdp(
+          "Runtime.releaseObject",
+          { objectId: resolved.objectId },
+          resolved.sessionId,
+        )
+        .catch(() => {});
+    }
+  }
+}
+
 function isRetryableSelectorWaitError(
   error: unknown,
   pageSessionId: string,
@@ -352,7 +413,7 @@ const URL_REGEX_SPECIAL_CHARS = new Set([
 ]);
 
 /** Compile the URL-glob subset used by Playwright string matchers. */
-function urlGlobToRegExp(glob: string): RegExp {
+export function urlGlobToRegExp(glob: string): RegExp {
   const tokens = ["^"];
   let inGroup = false;
 
@@ -421,13 +482,96 @@ function invalidURLGlobError(glob: string, reason: string): TypeError {
 
 const NAVIGATION_ATTEMPTS = 2;
 
+const HTTP_ERROR_NET_CODE = "net::ERR_HTTP_RESPONSE_CODE_FAILURE";
+/** How long goto waits for Chromium's error page to show the HTTP status. */
+const HTTP_ERROR_STATUS_PROBE_MS = 1_000;
+const HTTP_ERROR_STATUS_PROBES = 10;
+
 /**
- * Chromium reports an HTTP error status with an empty body only as this net
- * error, without the status code. Page.navigate does not return the status.
+ * Turn a Page.navigate errorText into an Error with a stable code and a hint.
+ * Chromium reports an HTTP error status with an empty body only as
+ * ERR_HTTP_RESPONSE_CODE_FAILURE; Page.navigate does not return the status.
+ * Chromium's own error page, committed in place of the document, names it
+ * ("HTTP ERROR 404"), so read it there instead of sending the request again.
  */
-function navigationErrorHint(errorText: string): string {
-  if (errorText !== "net::ERR_HTTP_RESPONSE_CODE_FAILURE") return "";
-  return " (the server answered with an HTTP error status, 4xx or 5xx, and an empty body; Node.js fetch(url) shows the status, without the Page's cookies)";
+async function navigationFailure(
+  services: PageWaitServices,
+  sessionId: string,
+  url: string,
+  errorText: string,
+  deadline: number,
+): Promise<HintedError> {
+  if (errorText !== HTTP_ERROR_NET_CODE) {
+    return withHint(
+      "EGO_NAVIGATION_FAILED",
+      `page.goto failed: ${errorText}`,
+      errorHint({ message: errorText }) ??
+        "Check the URL, the host name and the network. Do not retry more than once.",
+      { code: "EGO_NAVIGATION_FAILED", netError: errorText, url },
+    );
+  }
+  const status = await errorPageHttpStatus(
+    services,
+    sessionId,
+    Math.min(
+      HTTP_ERROR_STATUS_PROBE_MS,
+      Math.max(0, deadline - services.now()),
+    ),
+  );
+  const answer =
+    status === undefined
+      ? "an HTTP error status (4xx or 5xx)"
+      : `HTTP ${status}`;
+  return withHint(
+    "EGO_NAVIGATION_HTTP_ERROR",
+    `page.goto failed: the server answered ${answer} with an empty body (${errorText})`,
+    httpErrorHint(status),
+    {
+      code: "EGO_NAVIGATION_HTTP_ERROR",
+      netError: errorText,
+      url,
+      ...(status === undefined ? {} : { status }),
+    },
+  );
+}
+
+function isNavigationFailure(error: unknown): boolean {
+  const code = (error as HintedError | undefined)?.error_code;
+  return (
+    code === "EGO_NAVIGATION_HTTP_ERROR" || code === "EGO_NAVIGATION_FAILED"
+  );
+}
+
+async function errorPageHttpStatus(
+  services: PageWaitServices,
+  sessionId: string,
+  budgetMs: number,
+): Promise<number | undefined> {
+  const deadline = services.now() + budgetMs;
+  for (let attempt = 1; attempt <= HTTP_ERROR_STATUS_PROBES; attempt += 1) {
+    try {
+      const response = await services.cdp(
+        "Runtime.evaluate",
+        {
+          expression:
+            'location.protocol === "chrome-error:" ? String(document.body && document.body.innerText || "") : ""',
+          returnByValue: true,
+        },
+        sessionId,
+        Math.max(1, Math.min(500, deadline - services.now())),
+      );
+      const text = response?.result?.value;
+      const match =
+        typeof text === "string" ? /HTTP ERROR (\d{3})\b/.exec(text) : null;
+      if (match) return Number(match[1]);
+    } catch {
+      // The error page may still be committing; this is best-effort.
+    }
+    const waitMs = deadline - services.now();
+    if (waitMs <= 0) break;
+    await services.sleep(Math.min(100, waitMs));
+  }
+  return undefined;
 }
 
 /** Navigate one Page and wait for the selected state of this navigation. */
@@ -478,8 +622,12 @@ export async function navigateInPage(
       }
     }
     if (navigation.errorText) {
-      throw new Error(
-        `page.goto failed: ${navigation.errorText}${navigationErrorHint(navigation.errorText)}`,
+      throw await navigationFailure(
+        services,
+        sessionId,
+        url,
+        navigation.errorText,
+        deadline,
       );
     }
     if (navigation.isDownload === true) {
@@ -506,6 +654,7 @@ export async function navigateInPage(
       ),
     });
   } catch (error) {
+    if (isNavigationFailure(error)) throw error;
     if (services.now() >= deadline || isLoadStateTimeout(error)) {
       if (!committed && navigation.loaderId) {
         committed = await navigationMatchesCurrentFrame(

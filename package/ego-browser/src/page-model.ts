@@ -8,6 +8,7 @@ import {
   ensureNetworkTracking,
   ensureSession,
   ensureFrameSessions,
+  inflightRequests,
   invalidateSession,
   isCdpRequestTimeoutError,
   isBrowserRuntime,
@@ -71,6 +72,23 @@ import {
   type PageKeyboardTypeOptions,
 } from "./driver/page-keyboard.js";
 import {
+  compileResponseMatcher,
+  ResponseCollector,
+  type CapturedResponse,
+  type ResponseMatcher,
+} from "./driver/network-capture.js";
+import {
+  formatSnapshotStats,
+  probePageState,
+  snapshotStats,
+  snapshotWarnings,
+  waitForSettledInPage,
+  type PageSettleOptions,
+  type PageSettleResult,
+  type SnapshotStats,
+} from "./driver/page-settle.js";
+import {
+  countSelectorMatchesInPage,
   isTransientElementError,
   navigateInPage,
   reloadInPage,
@@ -84,7 +102,7 @@ import {
   type PageWaitForURLOptions,
 } from "./driver/page-waits.js";
 import { ElementResolutionError } from "./element-resolver.js";
-import { invokeEgo, probeAgentControl } from "./ego-errors.js";
+import { attachHint, invokeEgo, probeAgentControl } from "./ego-errors.js";
 import {
   withPage as defaultWithPage,
   withSpace as defaultWithSpace,
@@ -182,6 +200,28 @@ type PageReloadOptions = Pick<PageGotoOptions, "timeout" | "waitUntil">;
 
 type PageSnapshotOptions = Omit<SnapshotOptions, "root"> & {
   root?: string;
+  format?: "text" | "object";
+  settle?: boolean | PageSettleOptions;
+};
+
+type PageWaitForResponseOptions = {
+  timeout?: number;
+  maxBodyBytes?: number;
+};
+
+type PageCaptureResponsesOptions = {
+  match?: ResponseMatcher;
+  maxBodies?: number;
+  maxBodyBytes?: number;
+  maxTotalBytes?: number;
+};
+
+/** `page.snapshot({ format: "object" })`: the same text plus its parts. */
+export type PageSnapshotObject = {
+  text: string;
+  stats?: SnapshotStats;
+  warnings: string[];
+  settle?: PageSettleResult;
 };
 
 type PageScreenshotOptions = Omit<CaptureScreenshotOptions, "full"> & {
@@ -377,6 +417,9 @@ type PageModelServices = {
     inflight: number;
     lastActivityAt: number;
   };
+  inflightRequests?(
+    sessionIds: string[],
+  ): Array<{ type?: string; startedAt: number }>;
   ensureSession(targetId: string): Promise<string>;
   ensureFrameSessions(
     targetId: string,
@@ -769,6 +812,7 @@ const baseDefaultServices: Omit<PageModelServices, "ledger" | "pageBudget"> = {
   ensureNetworkTracking,
   pageNetworkSessions,
   networkActivity,
+  inflightRequests,
   ensureSession,
   ensureFrameSessions,
   invalidateSession,
@@ -1148,23 +1192,31 @@ class TaskSpace {
       return error;
     }
     if (this.#finished) {
-      return new Error(
-        `${error.message}. Task space ${this.id} already finished, which ended its Page labels; do not use Pages after task.finish()`,
-        { cause: error },
+      return attachHint(
+        new Error(
+          `${error.message}. Task space ${this.id} already finished, which ended its Page labels; do not use Pages after task.finish()`,
+          { cause: error },
+        ),
+        "Open a new task space with await taskSpace(name) for further work.",
       );
     }
     if (this.ownership !== "agent") {
-      return new Error(
-        `${error.message}. Task space ${this.id} is owned by the user, so labels from a finished Agent task no longer exist; stop operating it unless the user asks you to continue`,
-        { cause: error },
+      return attachHint(
+        new Error(
+          `${error.message}. Task space ${this.id} is owned by the user, so labels from a finished Agent task no longer exist; stop operating it unless the user asks you to continue`,
+          { cause: error },
+        ),
+        "Stop. Ask the user before you work in this space again.",
       );
     }
     const labels = Object.keys(
       (await this.#services.ledger.read(this.id)).pages,
     );
-    return new Error(
-      `${error.message}. Managed Pages in task space ${this.id}: ${labels.join(", ") || "none"}. task.page(label) only refers to an existing Page; create one with await task.newPage()`,
-      { cause: error },
+    return attachHint(
+      new Error(
+        `${error.message}. Managed Pages in task space ${this.id}: ${labels.join(", ") || "none"}. task.page(label) only refers to an existing Page; create one with await task.newPage()`,
+        { cause: error },
+      ),
     );
   }
 
@@ -1497,6 +1549,32 @@ type PendingDownload = {
 };
 
 /** A file chooser intercepted before Chromium can open a native dialog. */
+/** Responses collected by page.captureResponses() until stop(). */
+class ResponseCapture {
+  readonly #collector: ResponseCollector;
+  readonly #unsubscribe: () => void;
+  #stopped?: Promise<CapturedResponse[]>;
+
+  constructor(collector: ResponseCollector, unsubscribe: () => void) {
+    this.#collector = collector;
+    this.#unsubscribe = unsubscribe;
+  }
+
+  /** The responses collected so far whose bodies are read. */
+  responses(): CapturedResponse[] {
+    return this.#collector.responses();
+  }
+
+  /** Stop collecting, wait for bodies being read, and return every response. */
+  stop(): Promise<CapturedResponse[]> {
+    this.#stopped ??= (async () => {
+      this.#unsubscribe();
+      return this.#collector.stop();
+    })();
+    return this.#stopped;
+  }
+}
+
 class FileChooser {
   readonly #services: PageModelServices;
   readonly #page: PageTarget;
@@ -1600,6 +1678,8 @@ class Page {
   #pendingFileChooser?: PendingFileChooser;
   #pendingDownload?: PendingDownload;
   #activeDownload?: Promise<void>;
+  /** Response waiters still subscribing; later Page calls wait for them. */
+  readonly #responseArms = new Set<Promise<unknown>>();
 
   constructor(
     task: TaskSpace,
@@ -1681,8 +1761,11 @@ class Page {
     return receipt;
   }
 
-  async snapshot(options: PageSnapshotOptions = {}): Promise<string> {
+  async snapshot(
+    options: PageSnapshotOptions = {},
+  ): Promise<string | PageSnapshotObject> {
     validatePublicApiOptions("Page.snapshot", options);
+    const settleOptions = snapshotSettleOptions(options.settle);
     const rootRefId =
       options.scope === "subtree" && options.root !== undefined
         ? parseRef(options.root)
@@ -1705,6 +1788,12 @@ class Page {
     const page = await this.#resolve();
     return this.#services.gate.withPage(page, async ({ sessionId }) => {
       await this.#activate(page.targetId);
+      const settle = settleOptions
+        ? await this.#waitForSettled(page, sessionId, settleOptions)
+        : undefined;
+      // Start the shared DOM observer before the snapshot, so the stats taken
+      // after it can tell whether the page changed meanwhile.
+      await probePageState(this.#services, sessionId);
       let root: number | undefined;
       let rootContext:
         | {
@@ -1733,7 +1822,12 @@ class Page {
             : {}),
         };
       }
-      const { root: _root, ...snapshotOptions } = options;
+      const {
+        root: _root,
+        format: _format,
+        settle: _settle,
+        ...snapshotOptions
+      } = options;
       const snapshotScope = options.scope ?? "only_within_viewport";
       let result: any;
       let documents = new Map<string, string>();
@@ -1790,8 +1884,184 @@ class Page {
       );
       const content = result?.content || "";
       const header = await this.#snapshotHeader(page);
-      return `${header}\n${content}`;
+      const { stats, warnings } = await this.#snapshotStats(
+        sessionId,
+        Array.isArray(result?.refs) ? result.refs.length : 0,
+      );
+      const statsLines = stats
+        ? `${formatSnapshotStats(stats, warnings)}\n`
+        : "";
+      const text = `${header}\n${statsLines}${content}`;
+      if (options.format !== "object") return text;
+      return {
+        text,
+        ...(stats ? { stats } : {}),
+        warnings,
+        ...(settle ? { settle } : {}),
+      };
     });
+  }
+
+  /**
+   * Wait for the next response this Page loads that matches a URL string,
+   * RegExp, or predicate, and resolve with its status, headers and parsed
+   * body. Arm it before the action that triggers the request.
+   */
+  waitForResponse(
+    matcher: ResponseMatcher,
+    options: PageWaitForResponseOptions = {},
+  ): Promise<CapturedResponse> {
+    validatePublicApiOptions("Page.waitForResponse", options);
+    compileResponseMatcher(matcher, "page.waitForResponse");
+    const timeoutMs = options.timeout ?? 10_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let settle!: {
+      resolve(response: CapturedResponse): void;
+      reject(error: unknown): void;
+    };
+    const outcome = new Promise<CapturedResponse>((resolve, reject) => {
+      settle = { resolve, reject };
+    });
+    // A timeout can land while the waiter is still arming; it is reported
+    // when the caller awaits, never as an unhandled rejection.
+    outcome.catch(() => {});
+    // The timeout starts now, like the Promise the caller is holding.
+    timer = setTimeout(() => {
+      settle.reject(
+        new Error(
+          `page.waitForResponse timed out after ${timeoutMs}ms waiting for ${describeResponseMatcher(matcher)}`,
+        ),
+      );
+    }, timeoutMs);
+    // Register the subscription before returning, so the action the caller
+    // runs next waits in #resolve() until this waiter is listening.
+    const arm = this.#followResponses({
+      match: matcher,
+      ...(options.maxBodyBytes === undefined
+        ? {}
+        : { maxBodyBytes: options.maxBodyBytes }),
+      onResponse: (response) => settle.resolve(response),
+      onMatchError: (error) => settle.reject(error),
+    });
+    this.#responseArms.add(arm);
+    const disarm = () => this.#responseArms.delete(arm);
+    arm.then(disarm, disarm);
+    return (async () => {
+      let unsubscribe: (() => void) | undefined;
+      try {
+        unsubscribe = await arm;
+        return await outcome;
+      } finally {
+        if (timer) clearTimeout(timer);
+        unsubscribe?.();
+      }
+    })();
+  }
+
+  /**
+   * Start collecting the responses this Page loads, with parsed bodies, until
+   * stop(). Without match it keeps fetch and XHR responses.
+   */
+  async captureResponses(
+    options: PageCaptureResponsesOptions = {},
+  ): Promise<ResponseCapture> {
+    validatePublicApiOptions("Page.captureResponses", options);
+    let collector!: ResponseCollector;
+    const unsubscribe = await this.#followResponses(options, (created) => {
+      collector = created;
+    });
+    return new ResponseCapture(collector, unsubscribe);
+  }
+
+  /** Subscribe a ResponseCollector to this Page and enable Network events. */
+  async #followResponses(
+    options: ConstructorParameters<typeof ResponseCollector>[2],
+    created?: (collector: ResponseCollector) => void,
+  ): Promise<() => void> {
+    const page = await this.#resolveEntry();
+    return this.#services.gate.withPage(page, async ({ sessionId }) => {
+      const apiName = created
+        ? "page.captureResponses"
+        : "page.waitForResponse";
+      const collector = new ResponseCollector(
+        this.#services,
+        sessionId,
+        options,
+        apiName,
+      );
+      created?.(collector);
+      const unsubscribe = this.#services.subscribePageEvents(
+        page.targetId,
+        collector.handleEvent,
+      );
+      try {
+        await this.#services.ensureNetworkTracking([sessionId]);
+      } catch (error) {
+        unsubscribe();
+        throw error;
+      }
+      return unsubscribe;
+    });
+  }
+
+  /**
+   * Wait until a client-rendered Page has drawn: document loaded, DOM quiet
+   * for quietMs, no fetch/XHR in flight, and `until` matched minCount times
+   * when given. Resolves with what it saw and does not throw on timeout.
+   */
+  async waitForSettled(
+    options: PageSettleOptions = {},
+  ): Promise<PageSettleResult> {
+    validatePublicApiOptions("Page.waitForSettled", options);
+    const page = await this.#resolve();
+    return this.#services.gate.withPage(page, async ({ sessionId }) => {
+      await this.#activate(page.targetId);
+      return this.#waitForSettled(page, sessionId, options);
+    });
+  }
+
+  async #waitForSettled(
+    page: PageTarget,
+    sessionId: string,
+    options: PageSettleOptions,
+  ): Promise<PageSettleResult> {
+    return waitForSettledInPage(
+      this.#services,
+      sessionId,
+      options,
+      async (selector) => {
+        const refMap = await this.#refMapForAction(page, sessionId, selector);
+        const iframeSessions = await this.#services.ensureFrameSessions(
+          page.targetId,
+        );
+        return countSelectorMatchesInPage(
+          this.#services,
+          sessionId,
+          refMap,
+          selector,
+          iframeSessions,
+        );
+      },
+      () => this.#services.pageNetworkSessions(sessionId),
+    );
+  }
+
+  /** Stats and warnings for the snapshot just taken; empty when unknown. */
+  async #snapshotStats(
+    sessionId: string,
+    refs: number,
+  ): Promise<{ stats?: SnapshotStats; warnings: string[] }> {
+    const state = await probePageState(this.#services, sessionId, true);
+    if (!state) return { warnings: [] };
+    let pendingRequests: number | undefined;
+    try {
+      const activity = this.#services.networkActivity([sessionId]);
+      if (activity?.tracking) pendingRequests = activity.inflight;
+    } catch {
+      // Network tracking is optional for stats.
+    }
+    const stats = snapshotStats(state, refs, pendingRequests);
+    return { stats, warnings: snapshotWarnings(stats, state) };
   }
 
   async url(): Promise<string> {
@@ -2520,6 +2790,15 @@ class Page {
   }
 
   async #resolve(): Promise<PageTarget> {
+    // A response waiter armed just before this call must be listening before
+    // the action it watches can send its request.
+    if (this.#responseArms.size > 0) {
+      await Promise.allSettled([...this.#responseArms]);
+    }
+    return this.#resolveEntry();
+  }
+
+  async #resolveEntry(): Promise<PageTarget> {
     const entry = await this.#services.ledger
       .getPage(this.spaceId, this.label)
       .catch(async (error) => {
@@ -2664,10 +2943,14 @@ class Page {
   ): Promise<Result> {
     const deadline = this.#services.now() + timeoutMs;
     let lastBlocker: Error | undefined;
+    // Whether any attempt reached the page with input. Such an attempt is never
+    // repeated, but its effects (a submit, a navigation) may still land.
+    let anyInputDispatched = false;
     while (true) {
       let inputDispatched = false;
       const services = this.#inputTrackingServices(() => {
         inputDispatched = true;
+        anyInputDispatched = true;
       });
       try {
         const prepared = await prepare(deadline - this.#services.now());
@@ -2687,10 +2970,12 @@ class Page {
         if (!retryable && !exhausted) throw error;
         if (remainingMs <= 0) {
           const blocker = exhausted && lastBlocker ? lastBlocker : error;
-          throw new ElementResolutionError(
+          const timeoutError = new ElementResolutionError(
             `${actionName} timed out after ${timeoutMs}ms: ${blocker.message}`,
             "transient",
           );
+          timeoutError.mayHaveLateEffects = anyInputDispatched;
+          throw timeoutError;
         }
         lastBlocker = error;
         await this.#services.sleep(
@@ -3010,6 +3295,21 @@ class Page {
     await this.#services.cdp("Target.activateTarget", { targetId });
     this.#services.setPreferredTarget(targetId);
   }
+}
+
+function describeResponseMatcher(matcher: ResponseMatcher): string {
+  if (typeof matcher === "string") return JSON.stringify(matcher);
+  if (matcher instanceof RegExp) return matcher.toString();
+  return "a response predicate";
+}
+
+function snapshotSettleOptions(
+  settle: PageSnapshotOptions["settle"],
+): PageSettleOptions | undefined {
+  if (settle === undefined || settle === false) return undefined;
+  if (settle === true) return {};
+  validatePublicApiOptions("Page.waitForSettled", settle);
+  return settle;
 }
 
 function pageSnapshotOptionsError(message: string): TypeError {

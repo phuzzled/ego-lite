@@ -2,7 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  attachHint,
+  buildEgoError,
   egoErrorCode,
+  errorHint,
+  httpErrorHint,
+  withHint,
   invokeEgo,
   isEgoErrorCode,
   isEgoUserControlError,
@@ -293,4 +298,91 @@ test("invokeEgo normalizes synchronous native throws", async () => {
 test("invokeEgo passes through successful results", async () => {
   const ok = { tabs: [] };
   assert.equal(await invokeEgo("listTabs", () => ok), ok);
+});
+
+test("errorHint gives every common failure a next step", () => {
+  const cases = [
+    [{ error_code: "EGO_NAVIGATION_HTTP_ERROR", status: 404 }, /answered 404/],
+    [{ message: "Selector #go matched 0 elements" }, /Take a new snapshot/],
+    [
+      { message: "page.click timed out after 3000ms: Element not found: x" },
+      /Take a new snapshot/,
+    ],
+    [{ message: "Locator text=Save matched 3 elements" }, />> nth=N/],
+    [{ message: "Stale ref: @4; take a new snapshot" }, /Refs last one page/],
+    [{ error_code: "EGO_BROWSER_UNAVAILABLE" }, /ego-browser stop/],
+    [{ error_code: "EGO_TASK_SPACE_USER_IN_CONTROL" }, /takeOverTaskSpace/],
+    [{ message: "page label not found: p3" }, /task\.newPage\(\)/],
+    [{ message: "page.goto failed: net::ERR_NAME_NOT_RESOLVED" }, /host name/],
+    [
+      { message: "page.waitForSelector timed out after 10000ms: .row" },
+      /snapshot or screenshot/,
+    ],
+    [
+      { message: "page.waitForLoadState(load) timed out after 100ms" },
+      /snapshot or screenshot/,
+    ],
+    [
+      { message: "Page changed during snapshot; take a new snapshot" },
+      /waitForSettled/,
+    ],
+  ];
+  for (const [error, expected] of cases) {
+    assert.match(errorHint(error), expected, JSON.stringify(error));
+  }
+  assert.equal(errorHint({ message: "something unrelated" }), undefined);
+  assert.equal(errorHint(null), undefined);
+  assert.equal(
+    errorHint({ message: "anything", hint: "explicit" }),
+    "explicit",
+    "an explicit hint wins",
+  );
+  // "matched 2 elements, but none can receive input" is not ambiguity.
+  assert.match(
+    errorHint({
+      message: "Selector #a matched 2 elements, but none can receive input",
+    }),
+    /Take a new snapshot/,
+  );
+});
+
+test("attachHint adds hint lines after the stack once", () => {
+  const error = new Error("Selector #go matched 0 elements");
+  assert.equal(attachHint(error), error);
+  assert.match(error.hint, /Take a new snapshot/);
+  assert.match(error.stack, /\n {4}at [\s\S]*\n {2}hint: Take a new snapshot/);
+  attachHint(error);
+  assert.equal(error.stack.match(/\n {2}hint: /g).length, 1);
+
+  const plain = new Error("no hint for this one");
+  attachHint(plain);
+  assert.equal(plain.hint, undefined);
+  assert.doesNotMatch(plain.stack, /hint:/);
+  assert.equal(attachHint("not an error"), "not an error");
+});
+
+test("withHint builds a coded error with status and hint lines", () => {
+  const error = withHint(
+    "EGO_NAVIGATION_HTTP_ERROR",
+    "page.goto failed: the server answered HTTP 404",
+    httpErrorHint(404),
+    { status: 404 },
+  );
+  assert.equal(error.error_code, "EGO_NAVIGATION_HTTP_ERROR");
+  assert.equal(error.status, 404);
+  assert.match(error.hint, /^The server answered 404\. Check the URL\./);
+  assert.match(
+    error.stack,
+    /\n {2}error_code: EGO_NAVIGATION_HTTP_ERROR\n {2}status: 404\n {2}hint: The server answered 404/,
+  );
+  assert.match(httpErrorHint(), /The server answered an error/);
+});
+
+test("ego binding errors carry their code's hint", () => {
+  const error = buildEgoError({
+    error: "browser went away",
+    error_code: "EGO_BROWSER_UNAVAILABLE",
+  });
+  assert.equal(error.error_code, "EGO_BROWSER_UNAVAILABLE");
+  assert.match(error.hint, /ego-browser stop/);
 });

@@ -84,11 +84,14 @@ export function formatHelp(doc: HelperDoc): string {
       `@param ${p.rest ? "..." : ""}${p.name}${opt}${type}${desc}${def}`,
     );
   }
-  if (doc.returns) {
+  if (doc.returns && !doc.public) {
     lines.push(`@returns ${doc.returns}`);
   }
   lines.push("");
   lines.push(doc.signature);
+  if (doc.returns && doc.public) {
+    lines.push(`  returns: ${doc.returns}`);
+  }
   return lines.join("\n");
 }
 
@@ -197,7 +200,7 @@ function publicEntryToHelpDoc(entry: PublicApiEntry): HelperDoc {
       ? `${entry.summary} Options: ${options}`
       : entry.summary,
     params: [],
-    returns: null,
+    returns: entry.returns,
     async: entry.signature.startsWith("await "),
     public: true,
   };

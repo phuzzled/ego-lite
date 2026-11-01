@@ -5965,6 +5965,66 @@ test("Page click times out while a pointer interceptor remains", async () => {
   });
 });
 
+test("an action timeout before any input reports no late effects and a hint", async () => {
+  await withFixture(async (fixture) => {
+    const task = taskForRound(fixture, "round-a");
+    const page = await openTestPage(task, "https://example.test/first");
+    fixture.interceptClickPoints(100);
+
+    await assert.rejects(
+      () => page.click("#covered", { timeout: 100 }),
+      (error) => {
+        assert.match(error.message, /page\.click timed out after 100ms/);
+        assert.equal(error.mayHaveLateEffects, false);
+        assert.equal(typeof error.hint, "string");
+        assert.match(error.stack, /\n {2}hint: /);
+        return true;
+      },
+    );
+  });
+});
+
+test("an action timeout after input reached the page reports late effects", async () => {
+  await withFixture(async (fixture) => {
+    const { ElementResolutionError } =
+      await import("../dist/src/element-resolver.js");
+    let releases = 0;
+    const task = taskForRound(fixture, "round-a", {
+      async cdp(method, params, sessionId, timeoutMs) {
+        const result = await fixture.services.cdp(
+          method,
+          params,
+          sessionId,
+          timeoutMs,
+        );
+        // The gesture reached the page, then the element kept changing.
+        if (
+          method === "Input.dispatchMouseEvent" &&
+          params.type === "mouseReleased"
+        ) {
+          releases += 1;
+          throw new ElementResolutionError(
+            "element is not visible after the click",
+            "transient",
+          );
+        }
+        return result;
+      },
+    });
+    const page = await openTestPage(task, "https://example.test/first");
+
+    await assert.rejects(
+      () => page.click("#submit", { timeout: 100 }),
+      (error) => {
+        assert.match(error.message, /page\.click timed out after 100ms/);
+        assert.equal(error.mayHaveLateEffects, true);
+        return true;
+      },
+    );
+    assert(releases >= 1, "the click reached the page");
+  });
+});
+
 test("Page click force bypasses only the pointer interception check", async () => {
   await withFixture(async (fixture) => {
     const task = taskForRound(fixture, "round-a");
@@ -6388,6 +6448,341 @@ test("newPage never closes a managed page when native returns its target again",
         ([kind, method]) => kind === "cdp" && method === "Target.closeTarget",
       ).length,
       closeCallsBefore,
+    );
+  });
+});
+
+/** Answer the settle probe like a Page that drew little text 800 ms ago. */
+function settleProbeServices(fixture, pageState = {}) {
+  const probes = [];
+  return {
+    probes,
+    overrides: {
+      async cdp(method, params, sessionId, timeoutMs) {
+        if (
+          method === "Runtime.evaluate" &&
+          params.expression.includes("egoBrowser.settle")
+        ) {
+          const full = params.expression.includes("innerText");
+          probes.push(full ? "full" : "light");
+          return {
+            result: {
+              type: "object",
+              value: {
+                __egoSettleProbe: true,
+                url: "https://example.test/first",
+                readyState: "complete",
+                quietMs: 900,
+                mutations: 0,
+                ageMs: 800,
+                ...(full ? { nodes: 18, textChars: 40 } : {}),
+                ...pageState,
+              },
+            },
+          };
+        }
+        return fixture.services.cdp(method, params, sessionId, timeoutMs);
+      },
+    },
+  };
+}
+
+test("snapshot adds a stats line and a rendering warning after the header", async () => {
+  await withFixture(async (fixture) => {
+    const { probes, overrides } = settleProbeServices(fixture);
+    const task = taskForRound(fixture, "round-a", overrides);
+    const page = await openTestPage(task, "https://example.test/first");
+
+    const text = await page.snapshot();
+    assert.match(
+      text,
+      /^\[p1 [^\n]*\]\n\[stats nodes=18 refs=1 text=40 readyState=complete domChanging=no\]\n\[warning page may still be rendering: the page loaded 800 ms ago and has little text\. Wait for the content \(page\.waitForSelector or page\.waitForSettled\), then snapshot again\.\]\nsnapshot:https:\/\/example\.test\/first$/,
+    );
+    assert.deepEqual(probes, ["light", "full"]);
+    assert.equal(
+      fixture.snapshotOptions.at(-1).format,
+      undefined,
+      "SDK-only options never reach the native snapshot",
+    );
+  });
+});
+
+test("snapshot format object returns the text, stats and warnings", async () => {
+  await withFixture(async (fixture) => {
+    const { overrides } = settleProbeServices(fixture, { textChars: 4_000 });
+    const task = taskForRound(fixture, "round-a", overrides);
+    const page = await openTestPage(task, "https://example.test/first");
+
+    const result = await page.snapshot({ format: "object" });
+    assert.equal(typeof result.text, "string");
+    assert.match(result.text, /\[stats nodes=18 refs=1 text=4000 /);
+    assert.deepEqual(result.stats, {
+      nodes: 18,
+      refs: 1,
+      textChars: 4_000,
+      readyState: "complete",
+      domChanging: false,
+    });
+    assert.deepEqual(result.warnings, []);
+    assert.equal(result.settle, undefined);
+    assert.doesNotMatch(result.text, /\[warning/);
+
+    await assert.rejects(
+      () => page.snapshot({ format: "json" }),
+      /format must be one of text, object/,
+    );
+  });
+});
+
+test("snapshot leaves the stats out when the page cannot be probed", async () => {
+  await withFixture(async (fixture) => {
+    const task = taskForRound(fixture, "round-a");
+    const page = await openTestPage(task, "https://example.test/first");
+    const result = await page.snapshot({ format: "object" });
+    assert.equal(result.stats, undefined);
+    assert.deepEqual(result.warnings, []);
+    assert.match(result.text, /\]\nsnapshot:https:\/\/example\.test\/first$/);
+  });
+});
+
+test("snapshot settle waits for the page before the snapshot", async () => {
+  await withFixture(async (fixture) => {
+    const { probes, overrides } = settleProbeServices(fixture, {
+      textChars: 4_000,
+    });
+    const task = taskForRound(fixture, "round-a", overrides);
+    const page = await openTestPage(task, "https://example.test/first");
+
+    const result = await page.snapshot({
+      settle: { quietMs: 800, timeout: 2_000 },
+      format: "object",
+    });
+    assert.equal(result.settle.settled, true);
+    assert.equal(result.settle.readyState, "complete");
+    assert.deepEqual(probes, ["light", "light", "full"]);
+    assert(
+      fixture.calls.some(
+        ([kind, method]) => kind === "cdp" && method === "Network.enable",
+      ),
+      "settle tracks fetch/XHR requests",
+    );
+    assert.match(await page.snapshot({ settle: true }), /\[stats /);
+
+    await assert.rejects(
+      () => page.snapshot({ settle: "yes" }),
+      /settle must be true, false, or an options object/,
+    );
+    await assert.rejects(
+      () => page.snapshot({ settle: { quiet: 1 } }),
+      /waitForSettled received unknown option: quiet/,
+    );
+  });
+});
+
+test("waitForSettled resolves with what it saw and counts until matches", async () => {
+  await withFixture(async (fixture) => {
+    const { overrides } = settleProbeServices(fixture);
+    const task = taskForRound(fixture, "round-a", overrides);
+    const page = await openTestPage(task, "https://example.test/first");
+
+    const settled = await page.waitForSettled({ until: "#ready" });
+    assert.equal(settled.settled, true);
+    assert.equal(settled.matches, 1);
+    assert.equal(settled.pendingRequests, 0);
+
+    fixture.setElementState({ present: false });
+    const missing = await page.waitForSettled({
+      until: "#ready",
+      timeout: 300,
+    });
+    assert.equal(missing.settled, false);
+    assert.equal(missing.matches, 0);
+    assert.equal(missing.reason, "#ready matched 0 of 1");
+
+    await assert.rejects(
+      () => page.waitForSettled({ minCount: 0 }),
+      /minCount must be a positive integer/,
+    );
+  });
+});
+
+/** Page event subscriptions and response bodies for the network tests. */
+function responseServices(fixture, bodies = {}) {
+  const listeners = new Map();
+  const network = {
+    overrides: {
+      subscribePageEvents(targetId, listener) {
+        const set = listeners.get(targetId) || new Set();
+        set.add(listener);
+        listeners.set(targetId, set);
+        return () => set.delete(listener);
+      },
+      async cdp(method, params, sessionId, timeoutMs) {
+        if (method === "Network.getResponseBody") {
+          return bodies[params.requestId] ?? { body: "", base64Encoded: false };
+        }
+        return fixture.services.cdp(method, params, sessionId, timeoutMs);
+      },
+    },
+    listenerCount(targetId) {
+      return listeners.get(targetId)?.size ?? 0;
+    },
+    respond(
+      targetId,
+      requestId,
+      url,
+      { type = "Fetch", mimeType = "application/json" } = {},
+    ) {
+      const emit = (method, params) => {
+        for (const listener of [...(listeners.get(targetId) || [])]) {
+          listener({ sessionId: `session:${targetId}`, method, params });
+        }
+      };
+      emit("Network.requestWillBeSent", {
+        requestId,
+        type,
+        request: { url, method: "GET" },
+      });
+      emit("Network.responseReceived", {
+        requestId,
+        type,
+        response: { url, status: 200, statusText: "OK", headers: {}, mimeType },
+      });
+      emit("Network.loadingFinished", { requestId, encodedDataLength: 20 });
+    },
+  };
+  return network;
+}
+
+test("waitForResponse arms before the action and resolves with the parsed body", async () => {
+  await withFixture(async (fixture) => {
+    const network = responseServices(fixture, {
+      "req-2": { body: '{"items":["a","b"]}', base64Encoded: false },
+    });
+    const listenersAtInput = [];
+    let page;
+    // Make the waiter's own Page lookup slow, so without the arm barrier the
+    // click would reach the page before the waiter subscribed.
+    const store = new PageLedgerStore({ rootDir: fixture.rootDir });
+    let delayNextLookup = false;
+    const ledger = new Proxy(store, {
+      get(target, property) {
+        const value = Reflect.get(target, property, target);
+        if (property !== "getPage") {
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return async (...args) => {
+          if (delayNextLookup) {
+            delayNextLookup = false;
+            await new Promise((resolve) => setTimeout(resolve, 30));
+          }
+          return value.apply(target, args);
+        };
+      },
+    });
+    const task = taskForRound(fixture, "round-a", {
+      ...network.overrides,
+      ledger,
+      async cdp(method, params, ...rest) {
+        if (method === "Input.dispatchMouseEvent") {
+          listenersAtInput.push(network.listenerCount(page.targetId));
+        }
+        return network.overrides.cdp(method, params, ...rest);
+      },
+    });
+    page = await openTestPage(task, "https://example.test/first");
+
+    delayNextLookup = true;
+    const pending = page.waitForResponse(/\/api\/items/);
+    await page.click("#ready");
+    assert(listenersAtInput.length > 0, "the click sent input");
+    assert(
+      listenersAtInput.every((count) => count === 1),
+      `the waiter listens before the click reaches the page: ${listenersAtInput}`,
+    );
+    network.respond(page.targetId, "req-1", "https://example.test/api/other");
+    network.respond(
+      page.targetId,
+      "req-2",
+      "https://example.test/api/items?q=a",
+    );
+    const response = await pending;
+
+    assert.equal(response.url, "https://example.test/api/items?q=a");
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.json, { items: ["a", "b"] });
+    assert.equal(
+      network.listenerCount(page.targetId),
+      0,
+      "the waiter unsubscribes",
+    );
+    assert(
+      fixture.calls.some(
+        ([kind, method]) => kind === "cdp" && method === "Network.enable",
+      ),
+    );
+  });
+});
+
+test("waitForResponse times out with the matcher in the message and validates input", async () => {
+  await withFixture(async (fixture) => {
+    const network = responseServices(fixture);
+    const task = taskForRound(fixture, "round-a", network.overrides);
+    const page = await openTestPage(task, "https://example.test/first");
+
+    await assert.rejects(
+      () => page.waitForResponse("/api/never", { timeout: 20 }),
+      (error) => {
+        assert.match(
+          error.message,
+          /page\.waitForResponse timed out after 20ms waiting for "\/api\/never"/,
+        );
+        return true;
+      },
+    );
+    assert.equal(network.listenerCount(page.targetId), 0);
+    assert.throws(
+      () => page.waitForResponse(42),
+      /matcher must be a non-empty URL string, a RegExp, or a function/,
+    );
+    assert.throws(
+      () => page.waitForResponse("/api", { maxBodyBytes: -1 }),
+      /maxBodyBytes must be a positive integer/,
+    );
+  });
+});
+
+test("captureResponses collects matching responses until stop", async () => {
+  await withFixture(async (fixture) => {
+    const network = responseServices(fixture, {
+      g1: { body: '{"data":1}', base64Encoded: false },
+      g2: { body: '{"data":2}', base64Encoded: false },
+    });
+    const task = taskForRound(fixture, "round-a", network.overrides);
+    const page = await openTestPage(task, "https://example.test/first");
+
+    const capture = await page.captureResponses({ match: "graphql" });
+    network.respond(page.targetId, "g1", "https://example.test/graphql?op=1");
+    network.respond(page.targetId, "skip", "https://example.test/rest");
+    network.respond(page.targetId, "g2", "https://example.test/graphql?op=2");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(capture.responses().length, 2);
+    const responses = await capture.stop();
+    network.respond(page.targetId, "g3", "https://example.test/graphql?op=3");
+
+    assert.deepEqual(
+      responses.map((response) => response.json),
+      [{ data: 1 }, { data: 2 }],
+    );
+    assert.equal(
+      await capture.stop(),
+      await capture.stop(),
+      "stop is idempotent",
+    );
+    assert.equal(network.listenerCount(page.targetId), 0);
+    await assert.rejects(
+      () => page.captureResponses({ match: 7 }),
+      /match must be a non-empty URL string, a RegExp, or a function/,
     );
   });
 });

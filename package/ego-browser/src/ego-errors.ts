@@ -239,7 +239,7 @@ export function buildEgoError(
     op ? `${op}: ${message}` : message,
   );
   if (code) error.error_code = code;
-  return error;
+  return attachHint(error);
 }
 
 /**
@@ -297,4 +297,142 @@ export function formatEgoError(err: unknown): string {
     }
   }
   return String(err);
+}
+
+/**
+ * An SDK error that tells the Agent what to do next. `error_code` is the
+ * stable classifier, `hint` is one imperative sentence, and `status` carries an
+ * HTTP status when the failure came from a server answer.
+ */
+export type HintedError = Error & {
+  error_code?: string;
+  code?: string;
+  hint?: string;
+  status?: number;
+};
+
+const HINT_MARKER = "\n  hint: ";
+
+const BROWSER_RESTART_HINT =
+  "Rerun this script once. If it fails again, restart the browser host (on Linux: ego-browser stop) and read its log.";
+
+/** Hints keyed by stable error code. Message patterns below cover the rest. */
+const HINTS_BY_CODE: Record<string, string> = {
+  EGO_BROWSER_UNAVAILABLE: BROWSER_RESTART_HINT,
+  EGO_TASK_HOST_DISCONNECTED: BROWSER_RESTART_HINT,
+  EGO_CDP_CHANNEL_UNAVAILABLE: BROWSER_RESTART_HINT,
+  EGO_TASK_SPACE_USER_IN_CONTROL:
+    "Stop. Tell the user what to finish, then resume with takeOverTaskSpace(spaceId) after they confirm.",
+  EGO_TASK_SPACE_INACTIVE:
+    "Stop. Wait until the user asks you to continue, then resume with claimTaskSpace(spaceId).",
+  EGO_TASK_SPACE_NOT_FOUND:
+    "List the spaces with await listTaskSpaces(), or create one with await taskSpace(name).",
+  EGO_NAVIGATION_FAILED:
+    "Check the URL, the host name and the network. Do not retry more than once.",
+  EGO_NAVIGATION_TIMEOUT:
+    "Take a snapshot to see whether the content you need is already there; otherwise retry once with a longer timeout.",
+  EGO_PAGE_BUDGET_REACHED:
+    "Close Pages you no longer need with await page.close(), then open a new one.",
+};
+
+const HINT_PATTERNS: ReadonlyArray<[RegExp, string]> = [
+  [
+    /Stale ref|Unknown ref|unknown frame provenance/,
+    "Refs last one page state. Take a new snapshot and use the new ref.",
+  ],
+  [
+    /Page changed during snapshot/,
+    "The page is still drawing. Wait for the content (page.waitForSelector or page.waitForSettled), then snapshot again.",
+  ],
+  [
+    /matched (?:[2-9]|\d{2,}) (?:elements|frame contexts)(?!, but none)/,
+    "Use a ref from a fresh snapshot, add >> nth=N, or use a more exact loc=role: name.",
+  ],
+  [
+    /matched 0 elements|Element not found|none can receive input/,
+    "Take a new snapshot; the page may have changed or not rendered yet. Then use a ref or a loc= locator from it.",
+  ],
+  [
+    /page label not found/,
+    "List the live Pages with await task.pages(). After a browser restart, Pages are gone; call await task.newPage().",
+  ],
+  [
+    /net::ERR_(?:NAME_NOT_RESOLVED|CONNECTION_\w+|TIMED_OUT|INTERNET_DISCONNECTED|ADDRESS_UNREACHABLE|NETWORK_CHANGED|PROXY\w*|SSL\w*|CERT\w*)/,
+    "Check the host name and the network. Do not retry more than once.",
+  ],
+  [
+    /page\.wait\w*(?:\([^)]*\))? timed out/,
+    "Print a snapshot or screenshot to see what the page shows instead.",
+  ],
+];
+
+/** Derive the next-step hint for any SDK or ego error, or undefined. */
+export function errorHint(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const value = error as HintedError;
+  if (typeof value.hint === "string" && value.hint) return value.hint;
+  const code = value.error_code || value.code;
+  if (code === "EGO_NAVIGATION_HTTP_ERROR") {
+    return httpErrorHint(value.status);
+  }
+  if (typeof code === "string" && Object.hasOwn(HINTS_BY_CODE, code)) {
+    return HINTS_BY_CODE[code];
+  }
+  const message = typeof value.message === "string" ? value.message : "";
+  for (const [pattern, hint] of HINT_PATTERNS) {
+    if (pattern.test(message)) return hint;
+  }
+  return undefined;
+}
+
+/** The hint for a navigation the server answered with an HTTP error. */
+export function httpErrorHint(status?: number): string {
+  const answer =
+    typeof status === "number" ? `answered ${status}` : "answered an error";
+  return `The server ${answer}. Check the URL. To read the status and body without navigating, use await page.fetch(url).`;
+}
+
+/**
+ * Give an error its next-step hint (the explicit one, or one derived from its
+ * code and message) and add `error_code`, `status` and `hint` lines after the
+ * stack, which is what the CLI and the hosts print. Idempotent and additive.
+ */
+export function attachHint<T>(error: T, hint?: string): T {
+  if (!(error instanceof Error)) return error;
+  const value = error as HintedError;
+  const resolved = hint || errorHint(value);
+  if (!resolved) return error;
+  try {
+    if (value.hint !== resolved) value.hint = resolved;
+  } catch {
+    // A getter-only hint already carries its own value.
+  }
+  try {
+    const stack = typeof value.stack === "string" ? value.stack : "";
+    if (!stack.includes(HINT_MARKER)) {
+      const code = value.error_code || value.code;
+      const lines = [
+        typeof code === "string" && code ? `\n  error_code: ${code}` : "",
+        typeof value.status === "number" ? `\n  status: ${value.status}` : "",
+        `${HINT_MARKER}${resolved}`,
+      ];
+      value.stack = `${stack || `${value.name}: ${value.message}`}${lines.join("")}`;
+    }
+  } catch {
+    // A frozen or exotic error keeps its original stack.
+  }
+  return error;
+}
+
+/** Build an Error with a stable code and a next-step hint. */
+export function withHint(
+  code: string,
+  message: string,
+  hint: string,
+  details: Record<string, unknown> = {},
+): HintedError {
+  const error = new Error(message) as HintedError;
+  error.error_code = code;
+  Object.assign(error, details);
+  return attachHint(error, hint);
 }

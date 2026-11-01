@@ -522,7 +522,94 @@ test("navigateInPage explains an HTTP error status with an empty body", async ()
       timeoutMs: 5_000,
       waitUntil: "load",
     }),
-    /ERR_HTTP_RESPONSE_CODE_FAILURE \(the server answered with an HTTP error status, 4xx or 5xx, and an empty body/,
+    (error) => {
+      assert.match(
+        error.message,
+        /the server answered an HTTP error status \(4xx or 5xx\) with an empty body \(net::ERR_HTTP_RESPONSE_CODE_FAILURE\)/,
+      );
+      assert.equal(error.error_code, "EGO_NAVIGATION_HTTP_ERROR");
+      assert.equal(error.status, undefined);
+      assert.match(error.hint, /page\.fetch\(url\)/);
+      return true;
+    },
+  );
+});
+
+test("navigateInPage reads the HTTP status from Chromium's error page", async () => {
+  let now = 0;
+  let probes = 0;
+  const services = {
+    async cdp(method, params) {
+      if (method === "Page.navigate") {
+        return {
+          frameId: "frame",
+          loaderId: "loader",
+          errorText: "net::ERR_HTTP_RESPONSE_CODE_FAILURE",
+        };
+      }
+      if (method === "Runtime.evaluate") {
+        assert.match(params.expression, /chrome-error:/);
+        probes += 1;
+        // The error page commits shortly after Page.navigate returns.
+        return {
+          result: {
+            type: "string",
+            value:
+              probes === 1
+                ? ""
+                : "This page can't be found\n\nHTTP ERROR 404\nReload",
+          },
+        };
+      }
+      throw new Error(`unexpected CDP method: ${method}`);
+    },
+    now: () => now,
+    async sleep(ms) {
+      now += ms;
+    },
+  };
+  await assert.rejects(
+    navigateInPage(services, "session:page", "https://example.com/404", {
+      timeoutMs: 5_000,
+      waitUntil: "load",
+    }),
+    (error) => {
+      assert.equal(error.error_code, "EGO_NAVIGATION_HTTP_ERROR");
+      assert.equal(error.status, 404);
+      assert.equal(error.url, "https://example.com/404");
+      assert.match(error.message, /the server answered HTTP 404/);
+      assert.match(error.hint, /The server answered 404\. Check the URL/);
+      assert.match(
+        error.stack,
+        /\n  status: 404\n  hint: The server answered 404/,
+      );
+      return true;
+    },
+  );
+  assert.equal(probes, 2);
+});
+
+test("navigateInPage keeps an HTTP error even when the status probe uses the whole budget", async () => {
+  let now = 0;
+  const services = {
+    async cdp(method) {
+      if (method === "Page.navigate") {
+        return { errorText: "net::ERR_HTTP_RESPONSE_CODE_FAILURE" };
+      }
+      now += 400;
+      return { result: { type: "string", value: "" } };
+    },
+    now: () => now,
+    async sleep(ms) {
+      now += ms;
+    },
+  };
+  await assert.rejects(
+    navigateInPage(services, "session:page", "https://example.com/500", {
+      timeoutMs: 600,
+      waitUntil: "load",
+    }),
+    { error_code: "EGO_NAVIGATION_HTTP_ERROR" },
   );
 });
 
@@ -565,6 +652,14 @@ test("navigateInPage keeps other navigation errors unchanged", async () => {
       timeoutMs: 5_000,
       waitUntil: "load",
     }),
-    { message: "page.goto failed: net::ERR_NAME_NOT_RESOLVED" },
+    (error) => {
+      assert.equal(
+        error.message,
+        "page.goto failed: net::ERR_NAME_NOT_RESOLVED",
+      );
+      assert.equal(error.error_code, "EGO_NAVIGATION_FAILED");
+      assert.match(error.hint, /Check the host name and the network/);
+      return true;
+    },
   );
 });

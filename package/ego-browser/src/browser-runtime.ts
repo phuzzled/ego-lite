@@ -189,6 +189,8 @@ function targetState(targetId) {
           frameId?: string;
           loaderId?: string;
           type?: string;
+          startedAt?: number;
+          responded?: boolean;
         }
       >(),
       ignoredFaviconRequestIds: new Set<string>(),
@@ -941,6 +943,33 @@ export function networkActivity(sessionIds: string[]): {
   return { tracking, inflight, lastActivityAt };
 }
 
+/**
+ * List the requests still in flight on the selected sessions, with their
+ * resource type and start time. Like networkActivity, it reads the continuous
+ * tracker and leaves the public Page event queue alone.
+ */
+export function inflightRequests(
+  sessionIds: string[],
+): Array<{ type?: string; startedAt: number; responded?: boolean }> {
+  const requests = new Map<
+    string,
+    { type?: string; startedAt: number; responded?: boolean }
+  >();
+  for (const sessionId of new Set(sessionIds)) {
+    const targetId = sessionTargets.get(sessionId);
+    const target = targetId ? targetStates.get(targetId) : undefined;
+    if (!target || target.sessionId !== sessionId) continue;
+    for (const request of target.inflightNetworkRequests.values()) {
+      requests.set(request.requestId, {
+        ...(request.type ? { type: request.type } : {}),
+        startedAt: request.startedAt ?? target.lastNetworkActivityAt,
+        ...(request.responded ? { responded: true } : {}),
+      });
+    }
+  }
+  return [...requests.values()];
+}
+
 /** Refresh and return the main and known OOPIF sessions for one Page. */
 export async function pageNetworkSessions(
   sessionId: string,
@@ -1306,8 +1335,21 @@ function recordNetworkEvent(targetId: string, target, data): void {
       ...(typeof data.params?.type === "string"
         ? { type: data.params.type }
         : {}),
+      startedAt: state.now(),
     });
     target.lastNetworkActivityAt = state.now();
+    return;
+  }
+  if (data.method === "Network.responseReceived") {
+    // The server has answered; the body may still be streaming, or never be
+    // read by the page. Network idle still waits for loadingFinished.
+    const rootTargetId = pageRootTargetId(targetId);
+    for (const pageTargetId of pageTreeTargetIds(rootTargetId)) {
+      const request = targetStates
+        .get(pageTargetId)
+        ?.inflightNetworkRequests.get(requestId);
+      if (request) request.responded = true;
+    }
     return;
   }
   if (
