@@ -1006,11 +1006,15 @@ function receiptText(receipt) {
  * manual_takeover"); the agent needs to know what to do instead.
  */
 function userInControlError(taskName, spaceId, cause) {
-  const raw = String(cause?.message || "");
-  const reason = raw.replace(/^[\w.]+:\s*/, "").trim() || "manual_takeover";
+  // The SDK's own message is written for scripts (it shows JavaScript to
+  // run); keep only a short reason code such as manual_takeover.
+  const raw = String(cause?.message || "")
+    .replace(/^[\w.]+:\s*/, "")
+    .trim();
+  const reason = /^[\w-]{1,40}$/.test(raw) ? `, reason: ${raw}` : "";
   return Object.assign(
     new Error(
-      `The user controls space ${spaceId} (task "${taskName}", reason: ${reason}).`,
+      `The user controls space ${spaceId} (task "${taskName}"${reason}). Browser tools on this task are paused until the user is done.`,
     ),
     {
       error_code: "EGO_TASK_SPACE_USER_IN_CONTROL",

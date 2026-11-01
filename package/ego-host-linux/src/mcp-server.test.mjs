@@ -101,9 +101,15 @@ function fakeBrowser() {
           });
         }
         if (spaces.get(nameOrId).userControl) {
-          throw Object.assign(new Error("task.restorePages: manual_takeover"), {
-            error_code: "EGO_TASK_SPACE_USER_IN_CONTROL",
-          });
+          const message = spaces.get(nameOrId).userControl;
+          throw Object.assign(
+            new Error(
+              typeof message === "string"
+                ? message
+                : "task.restorePages: manual_takeover",
+            ),
+            { error_code: "EGO_TASK_SPACE_USER_IN_CONTROL" },
+          );
         }
         log.reused.push(nameOrId);
         return makeTask(nameOrId);
@@ -409,6 +415,13 @@ test("a task the user controls fails with a clean error and a hint", async () =>
   );
   assert.match(text, /error_code: EGO_TASK_SPACE_USER_IN_CONTROL/);
   assert.match(text, /hint: .*browser_takeover/);
+  // The SDK's long message for scripts (with JavaScript to run) is dropped.
+  browser.spaces.get(10).userControl =
+    "page.snapshot: Control of this task space is with the user.\nWait, then:\n  const task = await takeOverTaskSpace(10);";
+  const long = await call(server, "browser_snapshot", {});
+  const longText = long.result.content[0].text;
+  assert.match(longText, /The user controls space 10 \(task "main"\)\./);
+  assert.doesNotMatch(longText, /takeOverTaskSpace|const task/);
   // The task is kept, so browser_takeover can still find it.
   browser.spaces.get(10).userControl = false;
   const back = await call(server, "browser_snapshot", {});
