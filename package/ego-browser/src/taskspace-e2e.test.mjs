@@ -306,12 +306,13 @@ test("cli e2e exposes the unified helperContext surface (help present, internals
     "Create and durably label a blank Page.",
     "",
     "await task.newPage()",
+    "  returns: Promise<Page>",
     'Legacy helper hidden from default help: click. Use help("legacy", "click").',
   ]);
   assert.deepEqual(JSON.parse(lines.at(-1)), {
     helpType: "function",
     publicHelp:
-      "TaskSpace.newPage\n\nCreate and durably label a blank Page.\n\nawait task.newPage()",
+      "TaskSpace.newPage\n\nCreate and durably label a blank Page.\n\nawait task.newPage()\n  returns: Promise<Page>",
     legacyHint:
       'Legacy helper hidden from default help: click. Use help("legacy", "click").',
     newTabType: "undefined",

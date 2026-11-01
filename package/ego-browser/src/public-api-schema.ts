@@ -20,6 +20,8 @@ export type PublicApiOption = {
 export type PublicApiEntry = {
   name: string;
   signature: string;
+  /** What the call resolves to, shown by help() on its own line. */
+  returns: string;
   summary: string;
   options?: Record<string, PublicApiOption>;
 };
@@ -59,17 +61,21 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "profiles",
     signature: "await profiles()",
+    returns: "Promise<Array<{ id, name, isDefault }>>",
     summary: "List browser profiles available for new task spaces.",
   },
   {
     name: "listTaskSpaces",
     signature: "await listTaskSpaces()",
+    returns:
+      "Promise<Array<{ id, name, ownership?, createdBy?, profileId?, profileName?, recentTabTitles? }>>",
     summary:
       "List Agent-owned and user-owned spaces available to reuse or claim.",
   },
   {
     name: "taskSpace",
     signature: "await taskSpace(nameOrId, { profileId? })",
+    returns: "Promise<TaskSpace>",
     summary:
       "Reuse or create an Agent-owned task space; a name held by a user-owned space fails with EGO_TASK_SPACE_NAME_IN_USE. A new space starts with managed Page p1, and profileId applies only when creating it.",
     options: {
@@ -82,71 +88,85 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "claimTaskSpace",
     signature: "await claimTaskSpace(spaceId)",
+    returns: "Promise<TaskSpace>",
     summary:
       "Claim a user-owned or inactive space after user approval and return TaskSpace.",
   },
   {
     name: "takeOverTaskSpace",
     signature: "await takeOverTaskSpace(spaceId)",
+    returns: "Promise<TaskSpace>",
     summary:
       "Resume an Agent-owned space after user approval and return TaskSpace.",
   },
   {
     name: "TaskSpace.spaceId",
     signature: "task.spaceId",
+    returns: "number",
     summary: "Stable numeric identifier for this task space.",
   },
   {
     name: "TaskSpace.name",
     signature: "task.name",
+    returns: "string",
     summary: "Human-readable task-space name.",
   },
   {
     name: "TaskSpace.ownership",
     signature: "task.ownership",
+    returns: 'string // "agent" or "user"',
     summary: "Ownership state captured when this TaskSpace was created.",
   },
   {
     name: "TaskSpace.page",
     signature: "task.page(label)",
+    returns: "Page // a lazy handle; no browser call",
     summary:
       "Create a lazy handle for an existing managed Page label; it neither creates a Page nor checks that the label exists.",
   },
   {
     name: "TaskSpace.userPage",
     signature: "task.userPage()",
+    returns: "Page | UnmanagedPage | undefined",
     summary:
       "Return the tab active at the claim/takeover boundary, when one was captured.",
   },
   {
     name: "TaskSpace.pages",
     signature: "await task.pages()",
+    returns: "Promise<Page[]>",
     summary: "List the managed Page handles in this space.",
   },
   {
     name: "TaskSpace.tabs",
     signature: "await task.tabs()",
+    returns:
+      "Promise<Array<{ targetId, label?, page, title, url, active, openedBy }>>",
     summary: "List managed Pages and unmanaged tabs in this space.",
   },
   {
     name: "TaskSpace.newPage",
     signature: "await task.newPage()",
+    returns: "Promise<Page>",
     summary: "Create and durably label a blank Page.",
   },
   {
     name: "TaskSpace.adopt",
     signature: "await task.adopt(unmanagedPage, { as? })",
+    returns: "Promise<Page>",
     summary: "Bring an unmanaged tab under the Page lifecycle.",
     options: { as: option("string", "Permanent Page label.") },
   },
   {
     name: "TaskSpace.release",
     signature: "await task.release(label)",
+    returns: "Promise<UnmanagedPage>",
     summary: "Stop managing an unknown-origin Page without closing it.",
   },
   {
     name: "TaskSpace.waitForControl",
     signature: "await task.waitForControl({ interval?, timeout? })",
+    returns: "Promise<void>",
     summary: "Wait for Agent control without taking it from the user.",
     options: {
       interval: option(
@@ -159,11 +179,14 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "TaskSpace.handOff",
     signature: "await task.handOff()",
+    returns: "Promise<void>",
     summary: "Give control of this space to the user.",
   },
   {
     name: "TaskSpace.finish",
     signature: "await task.finish({ keep })",
+    returns:
+      "Promise<{ spaceId, closedSpace, keptManagedLabels, closedManagedLabels, preservedUnmanagedCount }>",
     summary:
       "Finish the task and return a receipt with retained and closed managed Page labels; an empty list closes the space when no protected tabs remain.",
     options: {
@@ -176,33 +199,40 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "TaskSpace.cdp",
     signature: "await task.cdp(method, params?, { timeout? })",
+    returns: "Promise<object> // the CDP result",
     summary: "Send a Target or Browser domain CDP command.",
     options: { timeout },
   },
   {
     name: "Page.label",
     signature: "page.label",
+    returns: "string",
     summary: "Durable Page label used to restore the tab across rounds.",
   },
   {
     name: "Page.spaceId",
     signature: "page.spaceId",
+    returns: "number",
     summary: "Numeric identifier of the Page's task space.",
   },
   {
     name: "Page.openedBy",
     signature: "page.openedBy",
+    returns: "object // origin attribution",
     summary: "Conservative origin attribution for this Page.",
   },
   {
     name: "Page.targetId",
     signature: "page.targetId",
+    returns: "string | undefined",
     summary:
       "Internal browser target identifier for advanced Target-domain CDP only.",
   },
   {
     name: "Page.goto",
     signature: "await page.goto(url, { referer?, timeout?, waitUntil? })",
+    returns:
+      "Promise<ActionReceipt> // { popups?: { label, targetId }[], dialog? }. Not an HTTP response: no status().",
     summary:
       "Navigate this Page in place. Resolves to an action receipt { popups?, dialog? }, not an HTTP response: it has no status. Check the result with page.url(), page.title(), or a wait; use page.fetch() for an HTTP status. Timeout errors report whether the new document committed, plus its URL and readyState when available.",
     options: {
@@ -221,6 +251,8 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.reload",
     signature: "await page.reload({ timeout?, waitUntil? })",
+    returns:
+      "Promise<ActionReceipt> // { popups?, dialog? }. Not an HTTP response.",
     summary:
       "Reload this Page and wait for the selected navigation state. Resolves to an action receipt { popups?, dialog? }, not an HTTP response.",
     options: {
@@ -236,6 +268,8 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
     name: "Page.snapshot",
     signature:
       "await page.snapshot({ scope?, root?, includeActionMarks?, includeStableLocator? })",
+    returns:
+      "Promise<string> // header, stats and warning lines, then the tree",
     summary:
       "Return a semantic snapshot of the current viewport, full Page, or one snapshot-ref subtree with Page provenance.",
     options: {
@@ -256,6 +290,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
     name: "Page.screenshot",
     signature:
       "await page.screenshot({ path?, fullPage?, clip?, scale?, raw? })",
+    returns: "Promise<string> // the PNG file path",
     summary: "Capture this Page to a PNG file.",
     options: {
       path: option(
@@ -275,11 +310,13 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.url",
     signature: "await page.url()",
+    returns: "Promise<string>",
     summary: "Read this Page's current URL.",
   },
   {
     name: "Page.waitForURL",
     signature: "await page.waitForURL(urlMatcher, { timeout? })",
+    returns: "Promise<void>",
     summary:
       "Wait for an exact URL, Playwright-style glob, RegExp, or synchronous predicate receiving a URL object.",
     options: { timeout },
@@ -287,6 +324,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.waitForEvent",
     signature: "await page.waitForEvent(event, { timeout? })",
+    returns: 'Promise<Page> for "popup", Promise<Download> for "download"',
     summary:
       'Wait for this Page\'s next "popup" or "download"; arm the promise before the triggering action.',
     options: { timeout },
@@ -294,76 +332,90 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Download.page",
     signature: "download.page()",
+    returns: "Page",
     summary: "Return the Page that started this download.",
   },
   {
     name: "Download.url",
     signature: "download.url()",
+    returns: "string",
     summary: "Return the download URL.",
   },
   {
     name: "Download.suggestedFilename",
     signature: "download.suggestedFilename()",
+    returns: "string",
     summary: "Return Chromium's suggested file name.",
   },
   {
     name: "Download.saveAs",
     signature: "await download.saveAs(absolutePath)",
+    returns: "Promise<void>",
     summary:
       "Wait for completion and copy the download to an absolute path, creating missing parent directories.",
   },
   {
     name: "Download.path",
     signature: "await download.path()",
+    returns: "Promise<string>",
     summary:
       "Wait for completion and return the round-local temporary file path.",
   },
   {
     name: "Download.failure",
     signature: "await download.failure()",
+    returns: "Promise<string | null>",
     summary: "Wait for completion and return null or the failure reason.",
   },
   {
     name: "Download.cancel",
     signature: "await download.cancel()",
+    returns: "Promise<void>",
     summary: "Cancel this download by its Chromium download identifier.",
   },
   {
     name: "Download.delete",
     signature: "await download.delete()",
+    returns: "Promise<void>",
     summary: "Delete this download's round-local temporary files.",
   },
   {
     name: "Page.waitForTimeout",
     signature: "await page.waitForTimeout(timeout)",
+    returns: "Promise<void>",
     summary:
       "Wait a fixed number of milliseconds without activating this Page.",
   },
   {
     name: "Page.title",
     signature: "await page.title()",
+    returns: "Promise<string>",
     summary: "Read this Page's current title.",
   },
   {
     name: "Page.info",
     signature: "await page.info()",
+    returns: "Promise<{ url, title, w, h, sx, sy, pw, ph } | { dialog }>",
     summary: "Read URL, title, viewport, scroll, and dialog state.",
   },
   {
     name: "Page.acceptDialog",
     signature: "await page.acceptDialog(promptText?)",
+    returns: "Promise<boolean> // false when no dialog was open",
     summary:
       "Accept this Page's JavaScript dialog, optionally supplying prompt text; return false when none is open.",
   },
   {
     name: "Page.dismissDialog",
     signature: "await page.dismissDialog()",
+    returns: "Promise<boolean> // false when no dialog was open",
     summary:
       "Dismiss this Page's JavaScript dialog; return false when none is open.",
   },
   {
     name: "Page.evaluate",
     signature: "await page.evaluate(fnOrString, argument?)",
+    returns: "Promise<any> // the JSON-serializable result",
     summary:
       "Run JavaScript in this Page; callbacks receive JSON data but cannot capture Node.js variables. Safety-timeout errors report executionStopped, pageResponsive, and mayHaveLateEffects.",
   },
@@ -371,6 +423,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
     name: "Page.waitForFunction",
     signature:
       "await page.waitForFunction(fnOrString, argument?, { timeout?, polling? })",
+    returns: "Promise<true>",
     summary: "Wait until a Page function or expression returns a truthy value.",
     options: {
       timeout,
@@ -383,6 +436,8 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.fetch",
     signature: "await page.fetch(url, options?)",
+    returns:
+      "Promise<{ ok, status, statusText, url, headers, body?, savedPath? }>",
     summary:
       "Run window.fetch in this Page, obey browser CORS, and return a structured response.",
     options: {
@@ -426,12 +481,14 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.cdp",
     signature: "await page.cdp(method, params?, { timeout? })",
+    returns: "Promise<object> // the CDP result",
     summary: "Send a CDP command through this Page's target session.",
     options: { timeout },
   },
   {
     name: "Page.waitForSelector",
     signature: "await page.waitForSelector(selector, { timeout?, state? })",
+    returns: "Promise<true>",
     summary: "Wait for an element state in this Page.",
     options: {
       timeout,
@@ -446,6 +503,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.waitForLoadState",
     signature: "await page.waitForLoadState(state?, { timeout?, idleMs? })",
+    returns: "Promise<void>",
     summary:
       "Wait for DOM content, load, or network-idle state; no state defaults to load.",
     options: {
@@ -459,12 +517,14 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.events",
     signature: "await page.events()",
+    returns: "Promise<object[]> // raw CDP events, cleared after reading",
     summary: "Read and clear CDP events buffered for this Page.",
   },
   {
     name: "Page.click",
     signature:
       "await page.click(selector, { button?, clickCount?, delay?, position?, force?, timeout?, label? })",
+    returns: "Promise<ActionReceipt> // { popups?, dialog? }",
     summary: "Click an element with native CDP input.",
     options: {
       button,
@@ -480,6 +540,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
     name: "Page.dblclick",
     signature:
       "await page.dblclick(selector, { button?, delay?, position?, force?, timeout?, label? })",
+    returns: "Promise<ActionReceipt> // { popups?, dialog? }",
     summary: "Double-click an element with native CDP input.",
     options: { button, delay, position, force, timeout: actionTimeout, label },
   },
@@ -487,6 +548,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
     name: "Page.hover",
     signature:
       "await page.hover(selector, { position?, force?, timeout?, label? })",
+    returns: "Promise<ActionReceipt> // { popups?, dialog? }",
     summary: "Move the mouse over an element.",
     options: { position, force, timeout: actionTimeout, label },
   },
@@ -494,6 +556,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
     name: "Page.dragAndDrop",
     signature:
       "await page.dragAndDrop(source, target, { button?, sourcePosition?, targetPosition?, force?, timeout?, label? })",
+    returns: "Promise<ActionReceipt> // { popups?, dialog? }",
     summary: "Drag from one element to another.",
     options: {
       button,
@@ -507,6 +570,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.fill",
     signature: "await page.fill(selector, value, { clearFirst?, timeout? })",
+    returns: "Promise<ActionReceipt> // { popups?, dialog? }",
     summary:
       "Fill the selected field, its editing host, or its unique fillable descendant, then confirm editing took effect.",
     options: {
@@ -517,6 +581,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.selectOption",
     signature: "await page.selectOption(selector, valueOrValues, { timeout? })",
+    returns: "Promise<string[]> // the selected option values",
     summary:
       "Select by a value-or-label string or { value?, label?, index? }; arrays select multiple options, while null or [] clears the selection. The select must be enabled, but disabled options remain programmatically selectable.",
     options: { timeout: actionTimeout },
@@ -524,6 +589,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.focus",
     signature: "await page.focus(selector, { timeout? })",
+    returns: "Promise<ActionReceipt> // { popups?, dialog? }",
     summary:
       "Focus the element, its nearest interactive ancestor, or its unique editable descendant.",
     options: { timeout: actionTimeout },
@@ -531,6 +597,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.press",
     signature: "await page.press(selector, chord, { delay?, timeout? })",
+    returns: "Promise<ActionReceipt> // { popups?, dialog? }",
     summary:
       "Focus one element and press a key or shortcut chord. Named keys are case-insensitive; single-character keys preserve case.",
     options: { delay, timeout: actionTimeout },
@@ -538,35 +605,41 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.setInputFiles",
     signature: "await page.setInputFiles(selector, pathOrPaths)",
+    returns: "Promise<ActionReceipt> // { popups?, dialog? }",
     summary:
       "Set files on a file input resolved from the input, its label, or a unique descendant.",
   },
   {
     name: "Page.waitForFileChooser",
     signature: "page.waitForFileChooser({ timeout? })",
+    returns: "Promise<FileChooser>",
     summary: "Wait for a dynamically created file chooser.",
     options: { timeout },
   },
   {
     name: "FileChooser.isMultiple",
     signature: "fileChooser.isMultiple()",
+    returns: "boolean",
     summary: "Report whether the chooser accepts multiple files.",
   },
   {
     name: "FileChooser.setFiles",
     signature: "await fileChooser.setFiles(pathOrPaths)",
+    returns: "Promise<ActionReceipt> // { popups?, dialog? }",
     summary:
       "Set files on an intercepted chooser and return any JavaScript dialog opened by the upload.",
   },
   {
     name: "Page.close",
     signature: "await page.close()",
+    returns: "Promise<void>",
     summary: "Close this Page after confirming its tab disappeared.",
   },
   {
     name: "Page.mouse.click",
     signature:
       "await page.mouse.click(x, y, { button?, clickCount?, delay?, label? })",
+    returns: "Promise<ActionReceipt> // { popups?, dialog? }",
     summary: "Click CSS-pixel coordinates with native CDP input.",
     options: {
       button,
@@ -578,6 +651,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.mouse.move",
     signature: "await page.mouse.move(x, y, { steps?, label? })",
+    returns: "Promise<void>",
     summary: "Move the mouse to CSS-pixel coordinates.",
     options: {
       steps: option("positiveInteger", "Number of movement steps."),
@@ -587,6 +661,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.mouse.down",
     signature: "await page.mouse.down({ button?, clickCount? })",
+    returns: "Promise<void>",
     summary: "Press a mouse button at the current Page position.",
     options: {
       button,
@@ -599,6 +674,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.mouse.up",
     signature: "await page.mouse.up({ button?, clickCount? })",
+    returns: "Promise<void>",
     summary: "Release a mouse button at the current Page position.",
     options: {
       button,
@@ -611,6 +687,7 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.mouse.wheel",
     signature: "await page.mouse.wheel(deltaX, deltaY, { label? })",
+    returns: "Promise<void>",
     summary:
       "Perform a short wheel-input motion at the current Page position; move or click over the intended scroll container first in each process.",
     options: { label },
@@ -618,16 +695,19 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.keyboard.down",
     signature: "await page.keyboard.down(key)",
+    returns: "Promise<void>",
     summary: "Press and hold a keyboard key.",
   },
   {
     name: "Page.keyboard.up",
     signature: "await page.keyboard.up(key)",
+    returns: "Promise<void>",
     summary: "Release a keyboard key.",
   },
   {
     name: "Page.keyboard.press",
     signature: "await page.keyboard.press(chord, { delay? })",
+    returns: "Promise<ActionReceipt> // { popups?, dialog? }",
     summary:
       "Press and release a key or portable shortcut chord. Named keys are case-insensitive; single-character keys preserve case.",
     options: { delay },
@@ -635,17 +715,20 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.keyboard.type",
     signature: "await page.keyboard.type(text, { delay? })",
+    returns: "Promise<void>",
     summary: "Type text using physical keys where possible.",
     options: { delay },
   },
   {
     name: "Page.keyboard.insertText",
     signature: "await page.keyboard.insertText(text)",
+    returns: "Promise<void>",
     summary: "Insert text without synthesizing key presses.",
   },
   {
     name: "Page.keyboard.paste",
     signature: "await page.keyboard.paste(textOrContent)",
+    returns: "Promise<ActionReceipt> // { popups?, dialog? }",
     summary:
       "Send native paste with a string or { text, html? }, then restore the clipboard.",
   },

@@ -133,3 +133,21 @@ test("schema-driven option validation rejects unknown and invalid fields", () =>
     /keep must be "all" or an array of unique non-empty Page labels/,
   );
 });
+
+test("every public API entry says what it resolves to", () => {
+  for (const entry of PUBLIC_API_SCHEMA) {
+    assert.equal(
+      typeof entry.returns,
+      "string",
+      `${entry.name} needs a returns field`,
+    );
+    assert(entry.returns.trim().length > 0, `${entry.name} returns is empty`);
+    if (entry.signature.startsWith("await ")) {
+      assert.match(
+        entry.returns,
+        /^Promise</,
+        `${entry.name} is awaited, so it resolves a Promise`,
+      );
+    }
+  }
+});

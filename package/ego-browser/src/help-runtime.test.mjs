@@ -19,3 +19,19 @@ test("help keeps legacy and unknown names out of the public surface", () => {
   );
   assert.equal(help({}, "missingHelper"), "Unknown helper: missingHelper");
 });
+
+test("help prints what each public entry resolves to on its own line", () => {
+  const goto = help({}, "page.goto");
+  assert.match(goto.returns, /^Promise<ActionReceipt>/);
+  assert.match(
+    formatHelp(goto),
+    /await page\.goto\(url, \{ referer\?, timeout\?, waitUntil\? \}\)\n {2}returns: Promise<ActionReceipt> \/\/ .*Not an HTTP response/,
+  );
+  for (const doc of help({})) {
+    assert.match(
+      formatHelp(doc),
+      /\n {2}returns: \S/,
+      `${doc.name} help shows its return value`,
+    );
+  }
+});

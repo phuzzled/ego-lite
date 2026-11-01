@@ -104,7 +104,7 @@ test("help() prints its text without an explicit log", async () => {
   assert.equal(result.exitCode, 0);
   assert.equal(
     result.stdout,
-    "TaskSpace.newPage\n\nCreate and durably label a blank Page.\n\nawait task.newPage()\n",
+    "TaskSpace.newPage\n\nCreate and durably label a blank Page.\n\nawait task.newPage()\n  returns: Promise<Page>\n",
   );
 });
 
@@ -118,7 +118,7 @@ test("the embedded SDK prints help() through the host cliLog and returns the tex
 
   assert.equal(
     text,
-    "TaskSpace.newPage\n\nCreate and durably label a blank Page.\n\nawait task.newPage()",
+    "TaskSpace.newPage\n\nCreate and durably label a blank Page.\n\nawait task.newPage()\n  returns: Promise<Page>",
   );
   assert.deepEqual(lines, [text]);
 });
