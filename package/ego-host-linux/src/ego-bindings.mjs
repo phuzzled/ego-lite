@@ -10,9 +10,16 @@
  * - handOffTaskSpace({ relay: true }) writes a screenshot and a snapshot
  *   for the user instead of handing off;
  * - taskSpaceMemo(key, value?) and restoreTaskSpaceTabs() for re-runs;
- * - logEvent(entry) adds an action to the round log.
+ * - logEvent(entry) adds an action to the round log;
+ * - listProfiles() lists named profiles and `ephemeral`; a task space of a
+ *   named profile runs in that profile's browser, and raw CDP is routed
+ *   there (cdp-router.mjs);
+ * - fillSecret(name, { targetId, clear }) types a stored secret into the
+ *   focused field; the daemon does the typing, so the value never enters
+ *   this process.
  */
 import { CdpConnection } from "./cdp-connection.mjs";
+import { CdpRouter } from "./cdp-router.mjs";
 import {
   egoError,
   invalidArgument,
@@ -22,6 +29,7 @@ import {
 import { HOST_VERSION, daemonLogFile } from "./paths.mjs";
 import { sanitizeEntry } from "./round-log.mjs";
 import { captureSnapshot, validateSnapshotOptions } from "./snapshot.mjs";
+import { DEFAULT_PROFILE, browserOfProfile } from "./task-spaces.mjs";
 
 const NOT_SELECTED = () =>
   egoError("Task space not selected", "EGO_TASK_SPACE_NOT_SELECTED");
@@ -48,19 +56,36 @@ const UNLOGGED = new Set(["useTaskSpace", "getHostCapabilities", "logEvent"]);
  * @param {{ spaces: object[], round?: string, display?: string, headless?: boolean }} options.hello
  */
 export async function createEgoBindings({ control, hello }) {
-  const raw = await connectBrowser(control, hello);
-  let internal = null;
-  const internalConnection = async () => {
-    if (!internal || internal.closed) {
-      internal = await connectBrowser(control, hello);
+  const raw = new CdpRouter({
+    initial: await connectBrowser(control, hello),
+    connect: (browser) => connectBrowser(control, hello, browser),
+    defaultBrowser: DEFAULT_PROFILE.id,
+  });
+  // One connection per browser for the bindings' own CDP (snapshots).
+  const internal = new Map();
+  const internalConnection = async (browser = DEFAULT_PROFILE.id) => {
+    let connection = internal.get(browser);
+    if (!connection || connection.closed) {
+      connection = await connectBrowser(control, hello, browser);
+      internal.set(browser, connection);
     }
-    return internal;
+    return connection;
   };
 
   let spaces = summariesById(hello.spaces);
   control.onEvent((event, data) => {
     if (event === "spaces") spaces = summariesById(data);
   });
+  /** Browser (profile) that runs a space's tabs. */
+  const browserOf = (id) => browserOfProfile(spaces.get(id)?.profileId);
+  const browserOfTarget = (targetId) => {
+    for (const space of spaces.values()) {
+      if (space.targets?.includes(targetId)) {
+        return browserOfProfile(space.profileId);
+      }
+    }
+    return undefined;
+  };
 
   let selected;
   const noticed = new Set();
@@ -110,6 +135,9 @@ export async function createEgoBindings({ control, hello }) {
         handOffRelay: true,
         handOffViewer: hello.display === "virtual",
         logEvent: true,
+        profiles: true,
+        ephemeralProfile: true,
+        fillSecret: true,
       };
     },
 
@@ -120,6 +148,8 @@ export async function createEgoBindings({ control, hello }) {
         throw invalidArgument("useTaskSpace(id) requires a numeric id");
       }
       selected = id;
+      // Open the channel to this space's browser before the first command.
+      if (browserOf(id) !== DEFAULT_PROFILE.id) raw.prepare(browserOf(id));
       const lostTabs = spaces.get(id)?.lostTabs;
       if (lostTabs?.length && !noticed.has(id)) {
         noticed.add(id);
@@ -183,7 +213,14 @@ export async function createEgoBindings({ control, hello }) {
 
     async completeTaskSpace(...args) {
       expectArgs("completeTaskSpace", args, 0);
-      return taskCall("completeTaskSpace");
+      const id = selected;
+      const ephemeral = spaces.get(id)?.profileId === "ephemeral";
+      const result = await taskCall("completeTaskSpace");
+      if (ephemeral && typeof result === "string") {
+        // The SDK's receipt may say Pages were kept; they were not.
+        process.stderr.write(ephemeralFinishNotice(id));
+      }
+      return result;
     },
 
     async handOffTaskSpace(...args) {
@@ -303,17 +340,61 @@ export async function createEgoBindings({ control, hello }) {
       return result;
     },
 
+    /**
+     * fillSecret(name, { targetId, clear }) types the stored secret `name`
+     * into the focused field of the page (the active tab by default), when
+     * the field's origin is one the secret is bound to. Resolves
+     * { filled: true, secret, origin } or an error object.
+     */
+    async fillSecret(...args) {
+      expectArgs("fillSecret", args, 1, 2);
+      const [name, options] = args;
+      if (typeof name !== "string" || name.length === 0) {
+        throw invalidArgument("fillSecret(name) requires a secret name");
+      }
+      if (
+        options !== undefined &&
+        (options === null || typeof options !== "object")
+      ) {
+        throw invalidArgument("fillSecret options must be an object");
+      }
+      if (
+        options?.targetId !== undefined &&
+        typeof options.targetId !== "string"
+      ) {
+        throw invalidArgument("fillSecret targetId must be a string");
+      }
+      let targetId = options?.targetId;
+      if (targetId === undefined && selected !== undefined) {
+        const active = await activeTarget();
+        if (isEgoError(active)) return active;
+        targetId = active;
+      }
+      return taskCall("fillSecret", {
+        name,
+        targetId,
+        clear: options?.clear !== false,
+      });
+    },
+
     async snapshot(...args) {
       expectArgs("snapshot", args, 0, 1);
       const options = validateSnapshotOptions(args[0]);
       const targetId = await activeTarget();
       if (isEgoError(targetId)) throw rejectionFrom(targetId);
       try {
-        return await captureSnapshot(
-          await internalConnection(),
+        const result = await captureSnapshot(
+          await internalConnection(browserOf(selected)),
           targetId,
           options,
         );
+        // A space that had a secret filled: the daemon blanks its value.
+        if (!spaces.get(selected)?.secrets) return result;
+        const { text } = await call("redact", {
+          id: selected,
+          text: JSON.stringify(result),
+        });
+        return JSON.parse(text);
       } catch (error) {
         if (error?.error_code) throw error;
         const failure = new Error(String(error?.message || error));
@@ -332,9 +413,12 @@ export async function createEgoBindings({ control, hello }) {
       }
       const targetId = await activeTarget();
       if (isEgoError(targetId)) return targetId;
-      await showHighlight(await internalConnection(), targetId, x, y).catch(
-        () => {},
-      );
+      await showHighlight(
+        await internalConnection(browserOf(selected)),
+        targetId,
+        x,
+        y,
+      ).catch(() => {});
       return `${selected} mouse highlight shown.`;
     },
 
@@ -361,7 +445,7 @@ export async function createEgoBindings({ control, hello }) {
       }
       trackActivation(message, selected, spaces, activated, call);
       roundLog.command(message, selected);
-      raw.sendRaw(message);
+      raw.send(message, browserOf(selected), browserOfTarget);
       return undefined;
     },
 
@@ -419,7 +503,7 @@ export async function createEgoBindings({ control, hello }) {
       value() {
         roundLog.stop();
         raw.close();
-        internal?.close();
+        for (const connection of internal.values()) connection.close();
       },
     },
     /** Start and end lines for this round; `flushLog` sends what is queued. */
@@ -545,13 +629,22 @@ function originOf(url) {
 }
 
 /**
- * Connect to the browser through the daemon's CDP proxy. When that fails,
- * say hello again (it checks the browser) and retry once.
+ * Connect to a browser through the daemon's CDP proxy: the Default
+ * profile's, or the one of `browser`. When that fails, say hello again (it
+ * checks the browser) and retry once.
  */
-export async function connectBrowser(control, hello) {
+export async function connectBrowser(
+  control,
+  hello,
+  browser = DEFAULT_PROFILE.id,
+) {
+  const params = browser === DEFAULT_PROFILE.id ? {} : { browser };
   try {
-    return await CdpConnection.connectProxy(control.path);
+    return await CdpConnection.connectProxy(control.path, 10_000, params);
   } catch (first) {
+    if (browser !== DEFAULT_PROFILE.id) {
+      throw Object.assign(first, { error_code: "EGO_BROWSER_UNAVAILABLE" });
+    }
     const fresh = await control.call("hello").catch(() => null);
     if (fresh) {
       try {
@@ -583,6 +676,11 @@ export function headlessHandOffWarning(id) {
 /** Where the user can see a handed-off space. */
 export function viewerNotice(id, viewer) {
   return `[ego-browser] task space ${id} is handed off. Give the user this link (it works once):\n  ${viewer.url}\nFrom their computer they first run: ${viewer.ssh}\nThe viewer stops when the agent takes over or after ${Math.round((viewer.expiresAt - Date.now()) / 60_000)} minutes. A new link: ego-browser view\n`;
+}
+
+/** finish() deletes an ephemeral space, whatever Pages it was asked to keep. */
+export function ephemeralFinishNotice(id) {
+  return `[ego-browser] task space ${id} used the ephemeral profile, so finish() deleted it with its tabs, cookies and storage. Use a named profile (ego-browser profiles create <id>) to keep a session.\n`;
 }
 
 export function relayNotice(id, relay) {

@@ -173,8 +173,9 @@ export class CdpConnection {
   /**
    * The daemon's CDP proxy. The client asks for it on the control socket
    * ({"method":"cdpProxy"}); after the reply the socket carries CDP frames.
+   * `params.browser` picks the browser of a profile (Default when omitted).
    */
-  static connectProxy(socketPath, timeoutMs = 10_000) {
+  static connectProxy(socketPath, timeoutMs = 10_000, params = {}) {
     return new Promise((resolve, reject) => {
       const socket = connectSocket(socketPath);
       const fail = (error) => {
@@ -203,7 +204,7 @@ export class CdpConnection {
           resolve(new CdpConnection(streamTransport(socket, socket)));
         });
         socket.on("data", onData);
-        socket.write(encode({ id: 1, method: "cdpProxy", params: {} }));
+        socket.write(encode({ id: 1, method: "cdpProxy", params }));
       });
     });
   }
