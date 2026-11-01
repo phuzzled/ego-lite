@@ -650,6 +650,12 @@ const SNAPSHOT_ATTEMPTS = 3;
 /** Image tools reject very tall images; fullPage stops here by default. */
 const DEFAULT_FULL_PAGE_MAX_HEIGHT = 16_000;
 const DEFAULT_TILE_HEIGHT = 4_000;
+/** Fewer words than this and page.read() waits for the page once. */
+const READ_THIN_WORDS = 30;
+/** Under this many words page.read() checks the page is done drawing. */
+const READ_RECHECK_WORDS = 150;
+/** Longest wait page.read() spends on a page that is still drawing. */
+const READ_SETTLE_MS = 5_000;
 /** Tallest single capture behind a full-page screenshot; taller ones stitch. */
 const FULL_PAGE_REGION_HEIGHT = 4_000;
 /** Per-attempt timeouts for one full-page region (a stall is retried). */
@@ -2752,29 +2758,60 @@ class Page {
         ).catch(() => undefined);
         if (pdf?.pdf) return this.#readPdf(sessionId, pdf.url, maxChars);
       }
-      const raw = await evaluateIsolated<RawReadResult>(
-        this.#services,
-        sessionId,
-        extractReadable,
-        { mode: options.mode, selector: options.selector },
-        timeoutMs,
-      );
-      if (!raw || typeof raw !== "object") {
-        throw new Error("page.read got no result from the page");
-      }
-      if ("error" in raw && raw.error) {
-        throw attachHint(
-          new Error(`page.read: ${raw.error}`),
-          "Check the selector with a snapshot, or call page.read() without one.",
+      const startedAt = this.#services.now();
+      const extract = async (mode: PageReadOptions["mode"]) => {
+        const raw = await evaluateIsolated<RawReadResult>(
+          this.#services,
+          sessionId,
+          extractReadable,
+          { mode, selector: options.selector },
+          Math.max(1, timeoutMs - (this.#services.now() - startedAt)),
         );
+        if (!raw || typeof raw !== "object") {
+          throw new Error("page.read got no result from the page");
+        }
+        if ("error" in raw && raw.error) {
+          throw attachHint(
+            new Error(`page.read: ${raw.error}`),
+            "Check the selector with a snapshot, or call page.read() without one.",
+          );
+        }
+        return finishReadResult(
+          raw as Exclude<RawReadResult, { error: string }>,
+          maxChars,
+        );
+      };
+      let result = await extract(options.mode);
+      if (result.words < READ_RECHECK_WORDS && options.selector === undefined) {
+        // A client-rendered page (a job board, a search app) is often still
+        // drawing when goto() returns: wait for it once, then read again.
+        const budget = Math.min(
+          READ_SETTLE_MS,
+          timeoutMs - (this.#services.now() - startedAt) - 1_000,
+        );
+        if (budget > 0) {
+          await this.#waitForSettled(page, sessionId, {
+            timeout: budget,
+          }).catch(() => undefined);
+          result = await extract(options.mode);
+        }
       }
-      const result = finishReadResult(
-        raw as Exclude<RawReadResult, { error: string }>,
-        maxChars,
-      );
-      if (result.words < 30) {
+      if (
+        options.mode !== "full" &&
+        options.selector === undefined &&
+        result.source !== "body" &&
+        result.words < READ_RECHECK_WORDS
+      ) {
+        // The picked block is tiny; if the page as a whole has clearly more
+        // to read, return the whole page instead.
+        const full = await extract("full").catch(() => undefined);
+        if (full && full.words >= result.words * 3 + READ_THIN_WORDS) {
+          result = full;
+        }
+      }
+      if (result.words < READ_THIN_WORDS) {
         result.warning =
-          "the page has very little readable text: it may still be rendering, need a login, or keep its content in a frame. Wait (page.waitForSettled), then read again, or take a snapshot.";
+          'the page has very little readable text: it may still be rendering, need a login, or keep its content in a frame. Wait (page.waitForSettled), then read again, try page.read({ mode: "full" }), or take a snapshot.';
       }
       return result;
     });

@@ -7967,3 +7967,74 @@ test("restorePages gives a Page back the label a crash retired", async () => {
     ]);
   });
 });
+
+test("page.read waits once for a page that is still drawing, then falls back to full", async () => {
+  await withFixture(async (fixture) => {
+    const reads = [];
+    let drawn = false;
+    const jobs = Array.from(
+      { length: 10 },
+      (_v, i) => `Job ${i} ${"words ".repeat(20)}`,
+    ).join("\n\n");
+    const task = taskForRound(fixture, "round-a", {
+      async cdp(method, params, sessionId, timeoutMs) {
+        if (method === "Page.getFrameTree") {
+          return { frameTree: { frame: { id: "f" } } };
+        }
+        if (method === "Page.createIsolatedWorld") {
+          return { executionContextId: 9 };
+        }
+        if (method === "Runtime.evaluate" && params.contextId === 9) {
+          if (params.expression.includes("embed[original-url]")) {
+            return { result: { type: "object", value: { pdf: false } } };
+          }
+          const full = params.expression.includes('\\"mode\\":\\"full\\"');
+          reads.push(full ? "full" : "article");
+          const markdown = !drawn
+            ? "Loading"
+            : full
+              ? `# Available Jobs\n\n${jobs}`
+              : "# Available Jobs";
+          return {
+            result: {
+              type: "object",
+              value: {
+                url: "https://example.test/jobs",
+                title: "Jobs",
+                markdown,
+                links: [],
+                source: full ? "body" : "main",
+              },
+            },
+          };
+        }
+        if (
+          method === "Runtime.evaluate" &&
+          String(params.expression).includes("egoBrowser.settle")
+        ) {
+          drawn = true;
+          return {
+            result: {
+              type: "object",
+              value: {
+                __egoSettleProbe: true,
+                url: "https://example.test/jobs",
+                readyState: "complete",
+                quietMs: 900,
+                mutations: 0,
+                ageMs: 5000,
+              },
+            },
+          };
+        }
+        return fixture.services.cdp(method, params, sessionId, timeoutMs);
+      },
+    });
+    const page = await openTestPage(task, "https://example.test/jobs");
+    const result = await page.read();
+    assert.deepEqual(reads, ["article", "article", "full"]);
+    assert.equal(result.source, "body", "the whole page beats a tiny pick");
+    assert.match(result.markdown, /Job 9/);
+    assert.equal(result.warning, undefined);
+  });
+});
