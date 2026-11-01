@@ -8,6 +8,7 @@
  *   ego-browser spaces | close <id...> | close --all         list or close task spaces
  *   ego-browser gc | logs | view | relay | restore | service operations
  *   ego-browser profiles | cookies | secret                  identity: profiles, logins, secrets
+ *   ego-browser read | shot | tables | snapshot | search     one-shot commands
  *   ego-browser upgrade                                      how to update ego lite
  */
 import { spawn } from "node:child_process";
@@ -38,9 +39,16 @@ import {
   debugSdkPath,
   spacesFile,
 } from "../src/paths.mjs";
+import {
+  ONE_SHOT_USAGE,
+  UsageError,
+  parseOneShotArgs,
+  runOneShot,
+} from "../src/oneshot.mjs";
 import { ProfileStore } from "../src/profiles.mjs";
 import { formatEntry, readLogs } from "../src/round-log.mjs";
 import { SecretStore } from "../src/secrets.mjs";
+import { openSdkSession } from "../src/sdk-session.mjs";
 import { serviceCommand } from "../src/service.mjs";
 
 const USAGE = `ego-browser ${HOST_VERSION} (Linux)
@@ -82,7 +90,8 @@ Usage:
                                      store a secret (asks for it; or reads stdin)
   ego-browser secret list | remove <name>
   ego-browser upgrade
-`;
+
+${ONE_SHOT_USAGE}`;
 
 const INSTALL_COMMAND =
   "curl -fsSL https://raw.githubusercontent.com/phuzzled/ego-lite/main/package/ego-host-linux/scripts/install.sh | sh";
@@ -128,6 +137,12 @@ async function main(argv) {
       return secretCommand(rest);
     case "service":
       return serviceCommand(rest, { maxRssMb: loadConfig().config.maxRssMb });
+    case "read":
+    case "shot":
+    case "tables":
+    case "snapshot":
+    case "search":
+      return oneShotCommand(command, rest);
     case "upgrade":
       process.stdout.write(
         `Re-run the ego lite Linux installer to upgrade:\n  ${INSTALL_COMMAND}\n`,
@@ -182,6 +197,48 @@ function printSkill({ sdkPath }) {
   }
   process.stdout.write(readFileSync(guide, "utf8"));
   return 0;
+}
+
+/** Open an in-process SDK session; null after printing why it cannot. */
+function sdkPathOrNull(sdkPath) {
+  const sdk = resolveSdk(sdkPath);
+  if (!existsSync(sdk.path)) {
+    process.stderr.write(`ego-browser SDK not found: ${sdk.path}\n`);
+    return null;
+  }
+  return sdk.path;
+}
+
+async function oneShotCommand(command, args) {
+  if (args.includes("-h") || args.includes("--help")) {
+    process.stdout.write(ONE_SHOT_USAGE);
+    return 0;
+  }
+  let options;
+  try {
+    options = parseOneShotArgs(command, args);
+  } catch (error) {
+    if (!(error instanceof UsageError)) throw error;
+    process.stderr.write(
+      `ego-browser ${command}: ${error.message}\n\n${ONE_SHOT_USAGE}`,
+    );
+    return 2;
+  }
+  const sdkPath = sdkPathOrNull(options.sdkPath);
+  if (!sdkPath) return 1;
+  return runOneShot(options, {
+    openSession: () => openSdkSession({ sdkPath, connect: connectWithHello }),
+    stdout: process.stdout,
+    stderr: process.stderr,
+    onInterrupt(handler) {
+      process.once("SIGINT", handler);
+      process.once("SIGTERM", handler);
+      return () => {
+        process.off("SIGINT", handler);
+        process.off("SIGTERM", handler);
+      };
+    },
+  });
 }
 
 async function runNodejs({ sdkPath, code, rest }) {
