@@ -8,6 +8,7 @@ import {
   ensureNetworkTracking,
   ensureSession,
   ensureFrameSessions,
+  inflightRequests,
   invalidateSession,
   isCdpRequestTimeoutError,
   isBrowserRuntime,
@@ -71,6 +72,17 @@ import {
   type PageKeyboardTypeOptions,
 } from "./driver/page-keyboard.js";
 import {
+  formatSnapshotStats,
+  probePageState,
+  snapshotStats,
+  snapshotWarnings,
+  waitForSettledInPage,
+  type PageSettleOptions,
+  type PageSettleResult,
+  type SnapshotStats,
+} from "./driver/page-settle.js";
+import {
+  countSelectorMatchesInPage,
   isTransientElementError,
   navigateInPage,
   reloadInPage,
@@ -182,6 +194,16 @@ type PageReloadOptions = Pick<PageGotoOptions, "timeout" | "waitUntil">;
 
 type PageSnapshotOptions = Omit<SnapshotOptions, "root"> & {
   root?: string;
+  format?: "text" | "object";
+  settle?: boolean | PageSettleOptions;
+};
+
+/** `page.snapshot({ format: "object" })`: the same text plus its parts. */
+export type PageSnapshotObject = {
+  text: string;
+  stats?: SnapshotStats;
+  warnings: string[];
+  settle?: PageSettleResult;
 };
 
 type PageScreenshotOptions = Omit<CaptureScreenshotOptions, "full"> & {
@@ -377,6 +399,9 @@ type PageModelServices = {
     inflight: number;
     lastActivityAt: number;
   };
+  inflightRequests?(
+    sessionIds: string[],
+  ): Array<{ type?: string; startedAt: number }>;
   ensureSession(targetId: string): Promise<string>;
   ensureFrameSessions(
     targetId: string,
@@ -769,6 +794,7 @@ const baseDefaultServices: Omit<PageModelServices, "ledger" | "pageBudget"> = {
   ensureNetworkTracking,
   pageNetworkSessions,
   networkActivity,
+  inflightRequests,
   ensureSession,
   ensureFrameSessions,
   invalidateSession,
@@ -1689,8 +1715,11 @@ class Page {
     return receipt;
   }
 
-  async snapshot(options: PageSnapshotOptions = {}): Promise<string> {
+  async snapshot(
+    options: PageSnapshotOptions = {},
+  ): Promise<string | PageSnapshotObject> {
     validatePublicApiOptions("Page.snapshot", options);
+    const settleOptions = snapshotSettleOptions(options.settle);
     const rootRefId =
       options.scope === "subtree" && options.root !== undefined
         ? parseRef(options.root)
@@ -1713,6 +1742,12 @@ class Page {
     const page = await this.#resolve();
     return this.#services.gate.withPage(page, async ({ sessionId }) => {
       await this.#activate(page.targetId);
+      const settle = settleOptions
+        ? await this.#waitForSettled(page, sessionId, settleOptions)
+        : undefined;
+      // Start the shared DOM observer before the snapshot, so the stats taken
+      // after it can tell whether the page changed meanwhile.
+      await probePageState(this.#services, sessionId);
       let root: number | undefined;
       let rootContext:
         | {
@@ -1741,7 +1776,12 @@ class Page {
             : {}),
         };
       }
-      const { root: _root, ...snapshotOptions } = options;
+      const {
+        root: _root,
+        format: _format,
+        settle: _settle,
+        ...snapshotOptions
+      } = options;
       const snapshotScope = options.scope ?? "only_within_viewport";
       let result: any;
       let documents = new Map<string, string>();
@@ -1798,8 +1838,82 @@ class Page {
       );
       const content = result?.content || "";
       const header = await this.#snapshotHeader(page);
-      return `${header}\n${content}`;
+      const { stats, warnings } = await this.#snapshotStats(
+        sessionId,
+        Array.isArray(result?.refs) ? result.refs.length : 0,
+      );
+      const statsLines = stats
+        ? `${formatSnapshotStats(stats, warnings)}\n`
+        : "";
+      const text = `${header}\n${statsLines}${content}`;
+      if (options.format !== "object") return text;
+      return {
+        text,
+        ...(stats ? { stats } : {}),
+        warnings,
+        ...(settle ? { settle } : {}),
+      };
     });
+  }
+
+  /**
+   * Wait until a client-rendered Page has drawn: document loaded, DOM quiet
+   * for quietMs, no fetch/XHR in flight, and `until` matched minCount times
+   * when given. Resolves with what it saw and does not throw on timeout.
+   */
+  async waitForSettled(
+    options: PageSettleOptions = {},
+  ): Promise<PageSettleResult> {
+    validatePublicApiOptions("Page.waitForSettled", options);
+    const page = await this.#resolve();
+    return this.#services.gate.withPage(page, async ({ sessionId }) => {
+      await this.#activate(page.targetId);
+      return this.#waitForSettled(page, sessionId, options);
+    });
+  }
+
+  async #waitForSettled(
+    page: PageTarget,
+    sessionId: string,
+    options: PageSettleOptions,
+  ): Promise<PageSettleResult> {
+    return waitForSettledInPage(
+      this.#services,
+      sessionId,
+      options,
+      async (selector) => {
+        const refMap = await this.#refMapForAction(page, sessionId, selector);
+        const iframeSessions = await this.#services.ensureFrameSessions(
+          page.targetId,
+        );
+        return countSelectorMatchesInPage(
+          this.#services,
+          sessionId,
+          refMap,
+          selector,
+          iframeSessions,
+        );
+      },
+      () => this.#services.pageNetworkSessions(sessionId),
+    );
+  }
+
+  /** Stats and warnings for the snapshot just taken; empty when unknown. */
+  async #snapshotStats(
+    sessionId: string,
+    refs: number,
+  ): Promise<{ stats?: SnapshotStats; warnings: string[] }> {
+    const state = await probePageState(this.#services, sessionId, true);
+    if (!state) return { warnings: [] };
+    let pendingRequests: number | undefined;
+    try {
+      const activity = this.#services.networkActivity([sessionId]);
+      if (activity?.tracking) pendingRequests = activity.inflight;
+    } catch {
+      // Network tracking is optional for stats.
+    }
+    const stats = snapshotStats(state, refs, pendingRequests);
+    return { stats, warnings: snapshotWarnings(stats, state) };
   }
 
   async url(): Promise<string> {
@@ -3024,6 +3138,15 @@ class Page {
     await this.#services.cdp("Target.activateTarget", { targetId });
     this.#services.setPreferredTarget(targetId);
   }
+}
+
+function snapshotSettleOptions(
+  settle: PageSnapshotOptions["settle"],
+): PageSettleOptions | undefined {
+  if (settle === undefined || settle === false) return undefined;
+  if (settle === true) return {};
+  validatePublicApiOptions("Page.waitForSettled", settle);
+  return settle;
 }
 
 function pageSnapshotOptionsError(message: string): TypeError {

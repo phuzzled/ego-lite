@@ -7,6 +7,7 @@ export type PublicApiOptionKind =
   | "pageRetention"
   | "positiveInteger"
   | "positiveMilliseconds"
+  | "settle"
   | "string"
   | "stringRecord"
   | "point";
@@ -267,11 +268,11 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   {
     name: "Page.snapshot",
     signature:
-      "await page.snapshot({ scope?, root?, includeActionMarks?, includeStableLocator? })",
+      "await page.snapshot({ scope?, root?, includeActionMarks?, includeStableLocator?, settle?, format? })",
     returns:
-      "Promise<string> // header, stats and warning lines, then the tree",
+      'Promise<string> // header, a [stats ...] line, any [warning ...] lines, then the tree. With format: "object": Promise<{ text, stats?, warnings, settle? }>',
     summary:
-      "Return a semantic snapshot of the current viewport, full Page, or one snapshot-ref subtree with Page provenance.",
+      "Return a semantic snapshot of the current viewport, full Page, or one snapshot-ref subtree with Page provenance. A [warning page may still be rendering] line means the page looked unfinished: wait for the content, then snapshot again. Retries internally when the page changes during the snapshot.",
     options: {
       scope: option(
         "string",
@@ -284,6 +285,42 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
       ),
       includeActionMarks: option("boolean", "Include action marks."),
       includeStableLocator: option("boolean", "Include stable locators."),
+      settle: option(
+        "settle",
+        "true, or { quietMs?, timeout?, until?, minCount? }: run page.waitForSettled() first.",
+      ),
+      format: option(
+        "string",
+        "text (default) returns the string; object returns { text, stats, warnings, settle }.",
+        ["text", "object"],
+      ),
+    },
+  },
+  {
+    name: "Page.waitForSettled",
+    signature:
+      "await page.waitForSettled({ timeout?, quietMs?, until?, minCount? })",
+    returns:
+      'Promise<{ settled, waitedMs, mutationsSeen, pendingRequests, readyState?, matches?, reason? }> // reason is set when settled is false, such as "dom still changing"',
+    summary:
+      "Wait until a client-rendered Page has drawn: the document has loaded, the DOM has not changed for quietMs, no fetch/XHR it started is pending (long polls, WebSocket and EventSource are ignored), and until matches at least minCount elements. Does not throw on timeout; check settled. A content wait (waitForSelector) is still best when you know the selector.",
+    options: {
+      timeout: option(
+        "positiveMilliseconds",
+        "Maximum wait in milliseconds; defaults to 10000.",
+      ),
+      quietMs: option(
+        "positiveMilliseconds",
+        "How long the DOM must stay unchanged; defaults to 500.",
+      ),
+      until: option(
+        "nonEmptyString",
+        "Selector, loc= locator, or ref that must also match.",
+      ),
+      minCount: option(
+        "positiveInteger",
+        "Matches required for until; defaults to 1.",
+      ),
     },
   },
   {
@@ -830,6 +867,9 @@ function validateOptionValue(
     case "positiveMilliseconds":
       valid = typeof value === "number" && Number.isFinite(value) && value > 0;
       break;
+    case "settle":
+      valid = typeof value === "boolean" || isPlainObject(value);
+      break;
     case "string":
       valid = typeof value === "string";
       break;
@@ -864,6 +904,11 @@ function validateOptionValue(
     if (specification.kind === "pageRetention") {
       throw new TypeError(
         `${apiName} ${optionName} must be "all" or an array of unique non-empty Page labels`,
+      );
+    }
+    if (specification.kind === "settle") {
+      throw new TypeError(
+        `${apiName} ${optionName} must be true, false, or an options object`,
       );
     }
     if (specification.kind === "stringRecord") {

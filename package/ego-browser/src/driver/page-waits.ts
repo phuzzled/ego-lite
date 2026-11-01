@@ -212,6 +212,61 @@ export async function waitForSelectorInPage(
   );
 }
 
+/**
+ * Count the elements a selector matches right now: 0 while it matches
+ * nothing, 1 when it resolves uniquely, and the reported count when strict
+ * resolution finds several. Used by waitForSettled({ until, minCount }).
+ */
+export async function countSelectorMatchesInPage(
+  services: Pick<PageWaitServices, "cdp">,
+  sessionId: string,
+  refMap: RefMap,
+  selector: string,
+  iframeSessions: Map<string, string>,
+): Promise<number> {
+  if (typeof selector !== "string" || selector.length === 0) {
+    throw new TypeError("page.waitForSettled until must be a non-empty string");
+  }
+  let resolved: { objectId: string; sessionId: string } | undefined;
+  try {
+    resolved = await resolveElementObjectId(
+      cdpAdapter(services as PageWaitServices),
+      sessionId,
+      refMap,
+      selector,
+      iframeSessions,
+      { strict: true },
+    );
+    return 1;
+  } catch (error) {
+    if (error instanceof ElementResolutionError) {
+      const match =
+        /matched (\d+) (?:elements|frame contexts)(?!, but none)/.exec(
+          error.message,
+        );
+      if (match) return Number(match[1]);
+      if (error.kind === "transient") return 0;
+    }
+    if (
+      isTransientElementError(error) ||
+      isTransientNavigationContextError(error)
+    ) {
+      return 0;
+    }
+    throw error;
+  } finally {
+    if (resolved?.objectId) {
+      await services
+        .cdp(
+          "Runtime.releaseObject",
+          { objectId: resolved.objectId },
+          resolved.sessionId,
+        )
+        .catch(() => {});
+    }
+  }
+}
+
 function isRetryableSelectorWaitError(
   error: unknown,
   pageSessionId: string,

@@ -189,6 +189,7 @@ function targetState(targetId) {
           frameId?: string;
           loaderId?: string;
           type?: string;
+          startedAt?: number;
         }
       >(),
       ignoredFaviconRequestIds: new Set<string>(),
@@ -941,6 +942,29 @@ export function networkActivity(sessionIds: string[]): {
   return { tracking, inflight, lastActivityAt };
 }
 
+/**
+ * List the requests still in flight on the selected sessions, with their
+ * resource type and start time. Like networkActivity, it reads the continuous
+ * tracker and leaves the public Page event queue alone.
+ */
+export function inflightRequests(
+  sessionIds: string[],
+): Array<{ type?: string; startedAt: number }> {
+  const requests = new Map<string, { type?: string; startedAt: number }>();
+  for (const sessionId of new Set(sessionIds)) {
+    const targetId = sessionTargets.get(sessionId);
+    const target = targetId ? targetStates.get(targetId) : undefined;
+    if (!target || target.sessionId !== sessionId) continue;
+    for (const request of target.inflightNetworkRequests.values()) {
+      requests.set(request.requestId, {
+        ...(request.type ? { type: request.type } : {}),
+        startedAt: request.startedAt ?? target.lastNetworkActivityAt,
+      });
+    }
+  }
+  return [...requests.values()];
+}
+
 /** Refresh and return the main and known OOPIF sessions for one Page. */
 export async function pageNetworkSessions(
   sessionId: string,
@@ -1306,6 +1330,7 @@ function recordNetworkEvent(targetId: string, target, data): void {
       ...(typeof data.params?.type === "string"
         ? { type: data.params.type }
         : {}),
+      startedAt: state.now(),
     });
     target.lastNetworkActivityAt = state.now();
     return;

@@ -6451,3 +6451,157 @@ test("newPage never closes a managed page when native returns its target again",
     );
   });
 });
+
+/** Answer the settle probe like a Page that drew little text 800 ms ago. */
+function settleProbeServices(fixture, pageState = {}) {
+  const probes = [];
+  return {
+    probes,
+    overrides: {
+      async cdp(method, params, sessionId, timeoutMs) {
+        if (
+          method === "Runtime.evaluate" &&
+          params.expression.includes("egoBrowser.settle")
+        ) {
+          const full = params.expression.includes("innerText");
+          probes.push(full ? "full" : "light");
+          return {
+            result: {
+              type: "object",
+              value: {
+                __egoSettleProbe: true,
+                url: "https://example.test/first",
+                readyState: "complete",
+                quietMs: 900,
+                mutations: 0,
+                ageMs: 800,
+                ...(full ? { nodes: 18, textChars: 40 } : {}),
+                ...pageState,
+              },
+            },
+          };
+        }
+        return fixture.services.cdp(method, params, sessionId, timeoutMs);
+      },
+    },
+  };
+}
+
+test("snapshot adds a stats line and a rendering warning after the header", async () => {
+  await withFixture(async (fixture) => {
+    const { probes, overrides } = settleProbeServices(fixture);
+    const task = taskForRound(fixture, "round-a", overrides);
+    const page = await openTestPage(task, "https://example.test/first");
+
+    const text = await page.snapshot();
+    assert.match(
+      text,
+      /^\[p1 [^\n]*\]\n\[stats nodes=18 refs=1 text=40 readyState=complete domChanging=no\]\n\[warning page may still be rendering: the page loaded 800 ms ago and has little text\. Wait for the content \(page\.waitForSelector or page\.waitForSettled\), then snapshot again\.\]\nsnapshot:https:\/\/example\.test\/first$/,
+    );
+    assert.deepEqual(probes, ["light", "full"]);
+    assert.equal(
+      fixture.snapshotOptions.at(-1).format,
+      undefined,
+      "SDK-only options never reach the native snapshot",
+    );
+  });
+});
+
+test("snapshot format object returns the text, stats and warnings", async () => {
+  await withFixture(async (fixture) => {
+    const { overrides } = settleProbeServices(fixture, { textChars: 4_000 });
+    const task = taskForRound(fixture, "round-a", overrides);
+    const page = await openTestPage(task, "https://example.test/first");
+
+    const result = await page.snapshot({ format: "object" });
+    assert.equal(typeof result.text, "string");
+    assert.match(result.text, /\[stats nodes=18 refs=1 text=4000 /);
+    assert.deepEqual(result.stats, {
+      nodes: 18,
+      refs: 1,
+      textChars: 4_000,
+      readyState: "complete",
+      domChanging: false,
+    });
+    assert.deepEqual(result.warnings, []);
+    assert.equal(result.settle, undefined);
+    assert.doesNotMatch(result.text, /\[warning/);
+
+    await assert.rejects(
+      () => page.snapshot({ format: "json" }),
+      /format must be one of text, object/,
+    );
+  });
+});
+
+test("snapshot leaves the stats out when the page cannot be probed", async () => {
+  await withFixture(async (fixture) => {
+    const task = taskForRound(fixture, "round-a");
+    const page = await openTestPage(task, "https://example.test/first");
+    const result = await page.snapshot({ format: "object" });
+    assert.equal(result.stats, undefined);
+    assert.deepEqual(result.warnings, []);
+    assert.match(result.text, /\]\nsnapshot:https:\/\/example\.test\/first$/);
+  });
+});
+
+test("snapshot settle waits for the page before the snapshot", async () => {
+  await withFixture(async (fixture) => {
+    const { probes, overrides } = settleProbeServices(fixture, {
+      textChars: 4_000,
+    });
+    const task = taskForRound(fixture, "round-a", overrides);
+    const page = await openTestPage(task, "https://example.test/first");
+
+    const result = await page.snapshot({
+      settle: { quietMs: 800, timeout: 2_000 },
+      format: "object",
+    });
+    assert.equal(result.settle.settled, true);
+    assert.equal(result.settle.readyState, "complete");
+    assert.deepEqual(probes, ["light", "light", "full"]);
+    assert(
+      fixture.calls.some(
+        ([kind, method]) => kind === "cdp" && method === "Network.enable",
+      ),
+      "settle tracks fetch/XHR requests",
+    );
+    assert.match(await page.snapshot({ settle: true }), /\[stats /);
+
+    await assert.rejects(
+      () => page.snapshot({ settle: "yes" }),
+      /settle must be true, false, or an options object/,
+    );
+    await assert.rejects(
+      () => page.snapshot({ settle: { quiet: 1 } }),
+      /waitForSettled received unknown option: quiet/,
+    );
+  });
+});
+
+test("waitForSettled resolves with what it saw and counts until matches", async () => {
+  await withFixture(async (fixture) => {
+    const { overrides } = settleProbeServices(fixture);
+    const task = taskForRound(fixture, "round-a", overrides);
+    const page = await openTestPage(task, "https://example.test/first");
+
+    const settled = await page.waitForSettled({ until: "#ready" });
+    assert.equal(settled.settled, true);
+    assert.equal(settled.matches, 1);
+    assert.equal(settled.pendingRequests, 0);
+
+    fixture.setElementState({ present: false });
+    const missing = await page.waitForSettled({
+      until: "#ready",
+      timeout: 300,
+    });
+    assert.equal(missing.settled, false);
+    assert.equal(missing.matches, 0);
+    assert.equal(missing.reason, "#ready matched 0 of 1");
+
+    await assert.rejects(
+      () => page.waitForSettled({ minCount: 0 }),
+      /minCount must be a positive integer/,
+    );
+  });
+});
