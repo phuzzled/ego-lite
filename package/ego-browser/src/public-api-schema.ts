@@ -186,15 +186,15 @@ export const PUBLIC_API_SCHEMA: readonly PublicApiEntry[] = [
   },
   {
     name: "TaskSpace.finish",
-    signature: "await task.finish({ keep })",
+    signature: "await task.finish({ keep? })",
     returns:
       "Promise<{ spaceId, closedSpace, keptManagedLabels, closedManagedLabels, preservedUnmanagedCount }>",
     summary:
-      "Finish the task and return a receipt with retained and closed managed Page labels; an empty list closes the space when no protected tabs remain.",
+      "Finish the task and return a receipt with retained and closed managed Page labels; an empty list closes the space when no protected tabs remain. With no argument it keeps nothing, like { keep: [] }.",
     options: {
       keep: option(
         "pageRetention",
-        'Required Page retention policy: "all" or an array of managed Page labels.',
+        'Page retention policy: "all" or an array of managed Page labels. Required when an options object is passed; finish() with no argument means [].',
       ),
     },
   },

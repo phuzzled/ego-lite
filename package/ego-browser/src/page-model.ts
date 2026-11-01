@@ -80,6 +80,7 @@ import {
 import {
   formatSnapshotStats,
   probePageState,
+  releasePageObserver,
   snapshotStats,
   snapshotWarnings,
   waitForSettledInPage,
@@ -1089,8 +1090,13 @@ class TaskSpace {
     });
   }
 
-  /** Finish the task with an explicit managed-Page retention policy. */
-  async finish(options: FinishOptions): Promise<TaskFinishReceipt> {
+  /**
+   * Finish the task with a managed-Page retention policy. With no argument it
+   * keeps nothing, like finish({ keep: [] }).
+   */
+  async finish(
+    options: FinishOptions = { keep: [] },
+  ): Promise<TaskFinishReceipt> {
     validatePublicApiOptions("TaskSpace.finish", options);
     if (!Object.hasOwn(options, "keep") || options.keep === undefined) {
       throw new TypeError(
@@ -1678,8 +1684,8 @@ class Page {
   #pendingFileChooser?: PendingFileChooser;
   #pendingDownload?: PendingDownload;
   #activeDownload?: Promise<void>;
-  /** Response waiters still subscribing; later Page calls wait for them. */
-  readonly #responseArms = new Set<Promise<unknown>>();
+  /** Response and download waiters still arming; later Page calls wait for them. */
+  readonly #waiterArms = new Set<Promise<unknown>>();
 
   constructor(
     task: TaskSpace,
@@ -1792,8 +1798,28 @@ class Page {
         ? await this.#waitForSettled(page, sessionId, settleOptions)
         : undefined;
       // Start the shared DOM observer before the snapshot, so the stats taken
-      // after it can tell whether the page changed meanwhile.
+      // after it can tell whether the page changed meanwhile. The stats probe
+      // removes it; a failed snapshot removes it here.
       await probePageState(this.#services, sessionId);
+      try {
+        return await this.#snapshotObserved(page, sessionId, options, {
+          rootRefId,
+          settle,
+        });
+      } catch (error) {
+        await releasePageObserver(this.#services, sessionId);
+        throw error;
+      }
+    });
+  }
+
+  async #snapshotObserved(
+    page: PageTarget,
+    sessionId: string,
+    options: PageSnapshotOptions,
+    { rootRefId, settle }: { rootRefId?: string; settle?: PageSettleResult },
+  ): Promise<string | PageSnapshotObject> {
+    {
       let root: number | undefined;
       let rootContext:
         | {
@@ -1899,7 +1925,7 @@ class Page {
         warnings,
         ...(settle ? { settle } : {}),
       };
-    });
+    }
   }
 
   /**
@@ -1943,8 +1969,8 @@ class Page {
       onResponse: (response) => settle.resolve(response),
       onMatchError: (error) => settle.reject(error),
     });
-    this.#responseArms.add(arm);
-    const disarm = () => this.#responseArms.delete(arm);
+    this.#waiterArms.add(arm);
+    const disarm = () => this.#waiterArms.delete(arm);
     arm.then(disarm, disarm);
     return (async () => {
       let unsubscribe: (() => void) | undefined;
@@ -2051,8 +2077,18 @@ class Page {
     sessionId: string,
     refs: number,
   ): Promise<{ stats?: SnapshotStats; warnings: string[] }> {
-    const state = await probePageState(this.#services, sessionId, true);
-    if (!state) return { warnings: [] };
+    // The last probe also removes the observer from the page.
+    const state = await probePageState(
+      this.#services,
+      sessionId,
+      true,
+      undefined,
+      true,
+    );
+    if (!state) {
+      await releasePageObserver(this.#services, sessionId);
+      return { warnings: [] };
+    }
     let pendingRequests: number | undefined;
     try {
       const activity = this.#services.networkActivity([sessionId]);
@@ -2148,7 +2184,8 @@ class Page {
     }
     const pending: PendingDownload = {
       arm: (async () => {
-        const page = await this.#resolve();
+        // #resolveEntry, not #resolve: #resolve waits for this very arm.
+        const page = await this.#resolveEntry();
         return this.#services.gate.withPage(page, async ({ sessionId }) => {
           const interception = this.#services.prepareDownload(page.targetId, {
             timeoutMs,
@@ -2164,6 +2201,12 @@ class Page {
       })(),
     };
     this.#pendingDownload = pending;
+    // Any Page call made next (evaluate, goto, mouse, keyboard...) waits in
+    // #resolve() until the download interception is listening, so a download
+    // started by that call cannot be missed.
+    this.#waiterArms.add(pending.arm);
+    const disarm = () => this.#waiterArms.delete(pending.arm);
+    pending.arm.then(disarm, disarm);
     return (async () => {
       let armed: ArmedDownload | undefined;
       try {
@@ -2790,10 +2833,10 @@ class Page {
   }
 
   async #resolve(): Promise<PageTarget> {
-    // A response waiter armed just before this call must be listening before
-    // the action it watches can send its request.
-    if (this.#responseArms.size > 0) {
-      await Promise.allSettled([...this.#responseArms]);
+    // A response or download waiter armed just before this call must be
+    // listening before the action it watches can start.
+    if (this.#waiterArms.size > 0) {
+      await Promise.allSettled([...this.#waiterArms]);
     }
     return this.#resolveEntry();
   }

@@ -5,6 +5,7 @@ import {
   formatSnapshotStats,
   pendingDataRequests,
   probePageState,
+  SETTLE_RELEASE_EXPRESSION,
   settleProbeExpression,
   snapshotStats,
   snapshotWarnings,
@@ -269,7 +270,8 @@ test("a probe that fails while the document is replaced is retried", async () =>
   };
   const result = await waitForSettledInPage(services, "session:page");
   assert.equal(result.settled, true);
-  assert.equal(calls, 3);
+  // Two failed probes, one good probe, then the observer is removed.
+  assert.equal(calls, 4);
   assert.equal(
     await probePageState({ ...services, cdp: async () => ({}) }, "s"),
     undefined,
@@ -346,4 +348,36 @@ test("snapshot stats and warnings flag a page caught before its content", () => 
   );
   const blank = { ...young, url: "about:blank", textChars: 0 };
   assert.deepEqual(snapshotWarnings(snapshotStats(blank, 0), blank), []);
+});
+
+test("a wait removes its observer from the page when it ends", async () => {
+  let now = 0;
+  const expressions = [];
+  const services = {
+    async cdp(_method, params) {
+      expressions.push(params.expression);
+      return {
+        result: {
+          value: {
+            __egoSettleProbe: true,
+            url: "https://example.test/",
+            readyState: "complete",
+            quietMs: 5_000,
+            mutations: 0,
+            ageMs: 9_000,
+          },
+        },
+      };
+    },
+    now: () => now,
+    async sleep(ms) {
+      now += ms;
+    },
+  };
+  await waitForSettledInPage(services, "session:page");
+  assert.equal(expressions.at(-1), SETTLE_RELEASE_EXPRESSION);
+  assert.match(SETTLE_RELEASE_EXPRESSION, /disconnect\(\)/);
+  assert.match(SETTLE_RELEASE_EXPRESSION, /delete globalThis\[key\]/);
+  assert.match(settleProbeExpression(true, true), /delete globalThis\[key\]/);
+  assert.doesNotMatch(settleProbeExpression(true), /delete globalThis/);
 });

@@ -1379,7 +1379,7 @@ test("v2 methods reject option fields that are absent from the public schema", a
       /page\.click received unknown option: trial/,
     );
     await assert.rejects(
-      () => task.finish(),
+      () => task.finish(null),
       /task\.finish options must be an object/,
     );
     await assert.rejects(
@@ -1508,6 +1508,29 @@ test("TaskSpace finish closes the whole space when no Pages are retained", async
       "closing the whole space does not close its Pages one by one",
     );
     assert.deepEqual((await ledger.read(7)).pages, {});
+  });
+});
+
+test("TaskSpace finish with no argument keeps nothing, like keep: []", async () => {
+  await withFixture(async (fixture) => {
+    const lifecycleCalls = [];
+    const ledger = new PageLedgerStore({ rootDir: fixture.rootDir });
+    const task = taskForRound(fixture, "round-a", {
+      ledger,
+      async completeTaskSpace() {
+        lifecycleCalls.push("finish");
+      },
+      async closeTaskSpace() {
+        lifecycleCalls.push("close");
+      },
+    });
+    await openTestPage(task, "https://example.test/one");
+
+    const receipt = await task.finish();
+
+    assert.equal(receipt.closedSpace, true);
+    assert.deepEqual(receipt.closedManagedLabels, ["p1"]);
+    assert.deepEqual(lifecycleCalls, ["close"]);
   });
 });
 
@@ -4944,6 +4967,81 @@ test("Page.waitForEvent exposes a Playwright-style download object", async () =>
   });
 });
 
+test("waitForEvent(download) is listening before a later evaluate runs", async () => {
+  await withFixture(async (fixture) => {
+    const order = [];
+    let resolveDownload;
+    const event = new Promise((resolve) => {
+      resolveDownload = resolve;
+    });
+    // Make the waiter's own Page lookup slow, so without the arm barrier the
+    // evaluate would reach the page before the download waiter listened.
+    const store = new PageLedgerStore({ rootDir: fixture.rootDir });
+    let delayNextLookup = false;
+    const ledger = new Proxy(store, {
+      get(target, property) {
+        const value = Reflect.get(target, property, target);
+        if (property !== "getPage") {
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return async (...args) => {
+          if (delayNextLookup) {
+            delayNextLookup = false;
+            await new Promise((resolve) => setTimeout(resolve, 30));
+          }
+          return value.apply(target, args);
+        };
+      },
+    });
+    const task = taskForRound(fixture, "round-a", {
+      ledger,
+      prepareDownload() {
+        return {
+          async ready() {
+            // A slow arm: without the barrier, evaluate would run first.
+            await new Promise((resolve) => setTimeout(resolve, 30));
+            order.push("ready");
+          },
+          event,
+          async dispose() {},
+        };
+      },
+      async cdp(method, params, sessionId, timeoutMs) {
+        if (
+          method === "Runtime.evaluate" &&
+          String(params?.expression).includes("startDownload")
+        ) {
+          order.push("evaluate");
+          resolveDownload({
+            url: "https://example.test/file",
+            suggestedFilename: "file.txt",
+            finished: Promise.resolve(),
+            async saveAs() {},
+            async path() {
+              return "/tmp/file.txt";
+            },
+            async failure() {
+              return null;
+            },
+            async cancel() {},
+            async delete() {},
+          });
+        }
+        return fixture.services.cdp(method, params, sessionId, timeoutMs);
+      },
+    });
+    const page = await openTestPage(task, "https://example.test/source");
+
+    delayNextLookup = true;
+    const pending = page.waitForEvent("download", { timeout: 1_000 });
+    await page.evaluate("globalThis.startDownload = 1");
+    const download = await pending;
+
+    assert.equal(download.suggestedFilename(), "file.txt");
+    assert.deepEqual(order, ["ready", "evaluate"]);
+  });
+});
+
 test("Page reapplies download behavior after its CDP session reconnects", async () => {
   await withFixture(async (fixture) => {
     let markFirstReady;
@@ -6461,10 +6559,25 @@ function settleProbeServices(fixture, pageState = {}) {
       async cdp(method, params, sessionId, timeoutMs) {
         if (
           method === "Runtime.evaluate" &&
+          params.expression.includes("egoBrowser.settle") &&
+          !params.expression.includes("__egoSettleProbe")
+        ) {
+          probes.push("release");
+          return { result: { type: "boolean", value: true } };
+        }
+        if (
+          method === "Runtime.evaluate" &&
           params.expression.includes("egoBrowser.settle")
         ) {
           const full = params.expression.includes("innerText");
           probes.push(full ? "full" : "light");
+          if (full) {
+            assert.match(
+              params.expression,
+              /disconnect\(\)[\s\S]*delete globalThis\[key\]/,
+              "the last snapshot probe removes the observer",
+            );
+          }
           return {
             result: {
               type: "object",
@@ -6559,7 +6672,7 @@ test("snapshot settle waits for the page before the snapshot", async () => {
     });
     assert.equal(result.settle.settled, true);
     assert.equal(result.settle.readyState, "complete");
-    assert.deepEqual(probes, ["light", "light", "full"]);
+    assert.deepEqual(probes, ["light", "release", "light", "full"]);
     assert(
       fixture.calls.some(
         ([kind, method]) => kind === "cdp" && method === "Network.enable",

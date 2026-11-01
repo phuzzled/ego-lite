@@ -11,9 +11,12 @@
  * a body the page does not read.
  *
  * The DOM signal is a MutationObserver that the first probe installs in the
- * page under a Symbol key, so later probes and snapshots share it. Everything
- * runs through Runtime.evaluate and the existing network tracker; no new
- * browser binding is needed.
+ * page under a Symbol key, so later probes in the same wait or snapshot share
+ * it. It is removed again when the wait or snapshot ends (the last probe of a
+ * snapshot releases it, and a wait releases it on the way out), so no observer
+ * stays behind in the page, including tabs the user owns. Everything runs
+ * through Runtime.evaluate and the existing network tracker; no new browser
+ * binding is needed.
  */
 
 export type PageSettleOptions = {
@@ -78,18 +81,20 @@ const DATA_REQUEST_TYPES = new Set(["Fetch", "XHR"]);
  * state. With `full`, also count elements and visible text, which costs a
  * layout pass and is only done once per snapshot.
  */
-export function settleProbeExpression(full: boolean): string {
+export function settleProbeExpression(full: boolean, release = false): string {
   return `(() => {
     const key = Symbol.for("egoBrowser.settle");
     const now = performance.now();
     let state = globalThis[key];
     if (!state || state.doc !== document) {
-      state = { doc: document, last: now, count: 0 };
+      try { state && state.observer && state.observer.disconnect(); } catch {}
+      state = { doc: document, last: now, count: 0, observer: null };
       try {
-        new MutationObserver((records) => {
+        state.observer = new MutationObserver((records) => {
           state.count += records.length;
           state.last = performance.now();
-        }).observe(document, { subtree: true, childList: true, characterData: true });
+        });
+        state.observer.observe(document, { subtree: true, childList: true, characterData: true });
       } catch {}
       Object.defineProperty(globalThis, key, { value: state, configurable: true });
     }
@@ -107,8 +112,41 @@ export function settleProbeExpression(full: boolean): string {
     result.textChars = document.body ? (document.body.innerText || "").length : 0;`
         : ""
     }
+    ${
+      release
+        ? `try { state.observer && state.observer.disconnect(); } catch {}
+    try { delete globalThis[key]; } catch {}`
+        : ""
+    }
     return result;
   })()`;
+}
+
+/** Remove the shared observer from the page; nothing of ours stays behind. */
+export const SETTLE_RELEASE_EXPRESSION = `(() => {
+    const key = Symbol.for("egoBrowser.settle");
+    const state = globalThis[key];
+    try { state && state.observer && state.observer.disconnect(); } catch {}
+    try { delete globalThis[key]; } catch {}
+    return true;
+  })()`;
+
+/** Best-effort removal of the shared observer. Never throws. */
+export async function releasePageObserver(
+  services: PageSettleServices,
+  sessionId: string,
+  timeoutMs = PROBE_TIMEOUT_MS,
+): Promise<void> {
+  try {
+    await services.cdp(
+      "Runtime.evaluate",
+      { expression: SETTLE_RELEASE_EXPRESSION, returnByValue: true },
+      sessionId,
+      timeoutMs,
+    );
+  } catch {
+    // The document may be gone, which removes the observer too.
+  }
 }
 
 /** Read the page state, or undefined while the document is being replaced. */
@@ -117,11 +155,12 @@ export async function probePageState(
   sessionId: string,
   full = false,
   timeoutMs = PROBE_TIMEOUT_MS,
+  release = false,
 ): Promise<PageSettleState | undefined> {
   try {
     const response = await services.cdp(
       "Runtime.evaluate",
-      { expression: settleProbeExpression(full), returnByValue: true },
+      { expression: settleProbeExpression(full, release), returnByValue: true },
       sessionId,
       timeoutMs,
     );
@@ -188,68 +227,76 @@ export async function waitForSettledInPage(
     // Without network tracking the DOM and readyState still decide.
   }
 
-  let lastMutations: number | undefined;
-  let mutationsSeen = 0;
-  let pending = 0;
-  let matches: number | undefined;
-  let readyState: string | undefined;
-  let reason = "the page did not answer";
-  while (true) {
-    const state = await probePageState(
-      services,
-      sessionId,
-      false,
-      Math.max(1, Math.min(PROBE_TIMEOUT_MS, deadline - services.now())),
-    );
-    if (state) {
-      readyState = state.readyState;
-      // Count changes seen during this wait. A new document restarts its
-      // observer count, so its whole count is new.
-      if (lastMutations === undefined) {
-        lastMutations = state.mutations;
-      } else {
-        mutationsSeen +=
-          state.mutations >= lastMutations
-            ? state.mutations - lastMutations
-            : state.mutations;
-        lastMutations = state.mutations;
-      }
-      pending = networkTracked
-        ? (pendingDataRequests(services, sessionIds) ?? 0)
-        : 0;
-      if (options.until !== undefined && countMatches) {
-        matches = await countMatches(options.until);
-      }
-      if (state.readyState !== "complete") {
-        reason = `document is still ${state.readyState}`;
-      } else if (state.quietMs < quietMs) {
-        reason = "dom still changing";
-      } else if (pending > 0) {
-        reason = `${pending} fetch/XHR request${pending === 1 ? "" : "s"} still pending`;
-      } else if (matches !== undefined && matches < minCount) {
-        reason = `${options.until} matched ${matches} of ${minCount}`;
-      } else {
-        return result(true);
-      }
-    } else if (readyState === undefined) {
-      // Keep the last real reason when only a late probe failed.
-      reason = "the document is being replaced";
-    }
-    const remaining = deadline - services.now();
-    if (remaining <= 0) return result(false);
-    await services.sleep(Math.min(SETTLE_POLL_MS, remaining));
+  try {
+    return await settleLoop();
+  } finally {
+    await releasePageObserver(services, sessionId);
   }
 
-  function result(settled: boolean): PageSettleResult {
-    return {
-      settled,
-      waitedMs: Math.max(0, services.now() - startedAt),
-      mutationsSeen,
-      pendingRequests: pending,
-      ...(readyState === undefined ? {} : { readyState }),
-      ...(matches === undefined ? {} : { matches }),
-      ...(settled ? {} : { reason }),
-    };
+  async function settleLoop(): Promise<PageSettleResult> {
+    let lastMutations: number | undefined;
+    let mutationsSeen = 0;
+    let pending = 0;
+    let matches: number | undefined;
+    let readyState: string | undefined;
+    let reason = "the page did not answer";
+    while (true) {
+      const state = await probePageState(
+        services,
+        sessionId,
+        false,
+        Math.max(1, Math.min(PROBE_TIMEOUT_MS, deadline - services.now())),
+      );
+      if (state) {
+        readyState = state.readyState;
+        // Count changes seen during this wait. A new document restarts its
+        // observer count, so its whole count is new.
+        if (lastMutations === undefined) {
+          lastMutations = state.mutations;
+        } else {
+          mutationsSeen +=
+            state.mutations >= lastMutations
+              ? state.mutations - lastMutations
+              : state.mutations;
+          lastMutations = state.mutations;
+        }
+        pending = networkTracked
+          ? (pendingDataRequests(services, sessionIds) ?? 0)
+          : 0;
+        if (options.until !== undefined && countMatches) {
+          matches = await countMatches(options.until);
+        }
+        if (state.readyState !== "complete") {
+          reason = `document is still ${state.readyState}`;
+        } else if (state.quietMs < quietMs) {
+          reason = "dom still changing";
+        } else if (pending > 0) {
+          reason = `${pending} fetch/XHR request${pending === 1 ? "" : "s"} still pending`;
+        } else if (matches !== undefined && matches < minCount) {
+          reason = `${options.until} matched ${matches} of ${minCount}`;
+        } else {
+          return result(true);
+        }
+      } else if (readyState === undefined) {
+        // Keep the last real reason when only a late probe failed.
+        reason = "the document is being replaced";
+      }
+      const remaining = deadline - services.now();
+      if (remaining <= 0) return result(false);
+      await services.sleep(Math.min(SETTLE_POLL_MS, remaining));
+    }
+
+    function result(settled: boolean): PageSettleResult {
+      return {
+        settled,
+        waitedMs: Math.max(0, services.now() - startedAt),
+        mutationsSeen,
+        pendingRequests: pending,
+        ...(readyState === undefined ? {} : { readyState }),
+        ...(matches === undefined ? {} : { matches }),
+        ...(settled ? {} : { reason }),
+      };
+    }
   }
 }
 
