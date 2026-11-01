@@ -48,6 +48,14 @@ export class TaskSpaceRegistry {
   pruneTargets(liveTargetIds) {
     const live = new Set(liveTargetIds);
     for (const space of this.#spaces.values()) {
+      const lost = space.targets.filter((targetId) => !live.has(targetId));
+      if (lost.length > 0) {
+        // Remember what was open, so the agent learns why its Pages are gone.
+        space.lostTabs = lost.map(
+          (targetId) => space.tabUrls?.[targetId] ?? "",
+        );
+      }
+      space.tabUrls = {};
       space.targets = space.targets.filter((targetId) => live.has(targetId));
       if (!live.has(space.activeTargetId)) {
         space.activeTargetId = space.targets.at(-1) ?? null;
@@ -244,6 +252,7 @@ export class TaskSpaceRegistry {
     if (!space) return;
     if (!space.targets.includes(targetId)) space.targets.push(targetId);
     space.activeTargetId = targetId;
+    delete space.lostTabs;
     this.#changed();
   }
 
@@ -268,10 +277,21 @@ export class TaskSpaceRegistry {
     if (touched) this.#changed();
   }
 
+  /** Saved state, with the last known URL of each tab. */
   snapshotState() {
     return {
       nextId: this.#nextId,
-      spaces: [...this.#spaces.values()].map((space) => structuredClone(space)),
+      spaces: [...this.#spaces.values()].map((space) => {
+        const copy = structuredClone(space);
+        copy.tabUrls = {};
+        for (const targetId of space.targets) {
+          const url =
+            this.#browser.targetInfo(targetId)?.url ??
+            space.tabUrls?.[targetId];
+          if (url) copy.tabUrls[targetId] = url;
+        }
+        return copy;
+      }),
     };
   }
 

@@ -38,6 +38,7 @@ export async function createEgoBindings({ control, hello }) {
   });
 
   let selected;
+  const noticed = new Set();
   // Tabs activated through raw CDP in this invocation. Kept locally so a
   // snapshot right after Target.activateTarget never races the daemon.
   const activated = new Map();
@@ -79,6 +80,11 @@ export async function createEgoBindings({ control, hello }) {
         throw invalidArgument("useTaskSpace(id) requires a numeric id");
       }
       selected = id;
+      const lostTabs = spaces.get(id)?.lostTabs;
+      if (lostTabs?.length && !noticed.has(id)) {
+        noticed.add(id);
+        process.stderr.write(lostTabsNotice(id, lostTabs));
+      }
       return id;
     },
 
@@ -278,6 +284,12 @@ export async function connectBrowser(control, hello) {
       { error_code: "EGO_BROWSER_UNAVAILABLE" },
     );
   }
+}
+
+/** Tabs do not survive a browser restart; say so instead of losing them quietly. */
+export function lostTabsNotice(id, urls) {
+  const list = urls.map((url) => `  ${url || "(unknown URL)"}\n`).join("");
+  return `[ego-browser] the browser restarted, so task space ${id} lost its tabs and Page labels. Open a Page with task.newPage() and go to the URL again. Tabs that were open:\n${list}`;
 }
 
 /** A headless browser has no window, so nobody can act on a hand-off. */

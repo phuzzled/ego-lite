@@ -3,6 +3,32 @@ import { describe, it, mock } from "node:test";
 import { createEgoBindings, rawCdpGate } from "./ego-bindings.mjs";
 import { webSocketServer } from "./test-support.mjs";
 
+describe("useTaskSpace", () => {
+  it("says once that a browser restart closed the space's tabs", async () => {
+    const server = await webSocketServer();
+    const hello = {
+      wsUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser/x`,
+      spaces: [{ id: 5, lostTabs: ["https://news.test/story"] }, { id: 6 }],
+    };
+    const control = { call: async () => null, onEvent: () => {} };
+    const ego = await createEgoBindings({ control, hello });
+    const write = mock.method(process.stderr, "write", () => true);
+    try {
+      ego.useTaskSpace(6);
+      ego.useTaskSpace(5);
+      ego.useTaskSpace(5);
+      const stderr = write.mock.calls.map((call) => call.arguments[0]);
+      assert.equal(stderr.length, 1);
+      assert.match(stderr[0], /task space 5 lost its tabs/);
+      assert.match(stderr[0], /https:\/\/news\.test\/story/);
+    } finally {
+      write.mock.restore();
+      ego.close();
+      server.close();
+    }
+  });
+});
+
 describe("handOffTaskSpace", () => {
   async function handOff(headless) {
     const server = await webSocketServer();

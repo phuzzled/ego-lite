@@ -191,6 +191,8 @@ export async function runDaemon(env = process.env) {
   function shutdown(code) {
     if (stopping) return;
     stopping = true;
+    // Keep the latest tab URLs, so a restart can say what was lost.
+    writeSaved(file, registry.snapshotState());
     server.close();
     for (const socket of clients) socket.destroy();
     rmSync(socketPath, { force: true });
@@ -290,6 +292,7 @@ function spaceSummaries(registry) {
     controlReason: space.controlReason,
     targets: space.targets,
     activeTargetId: space.activeTargetId,
+    lostTabs: space.lostTabs,
   }));
 }
 

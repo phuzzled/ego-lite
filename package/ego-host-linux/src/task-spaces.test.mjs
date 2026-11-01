@@ -177,6 +177,24 @@ describe("TaskSpaceRegistry", () => {
     assert.equal(tabs.find((tab) => tab.active).targetId, "T3");
   });
 
+  it("remembers the tabs a browser restart closed until a new tab opens", async () => {
+    await registry.createTaskSpace("work");
+    browser.infos.set("T1", { url: "https://news.test/story" });
+    const saved = registry.snapshotState();
+    assert.deepEqual(saved.spaces[0].tabUrls, {
+      T1: "https://news.test/story",
+    });
+
+    const restarted = new TaskSpaceRegistry({ browser: fakeBrowser(), saved });
+    restarted.pruneTargets([]);
+    const space = restarted.describe(1);
+    assert.deepEqual(space.targets, []);
+    assert.deepEqual(space.lostTabs, ["https://news.test/story"]);
+
+    await restarted.createTab(1, "about:blank");
+    assert.equal(restarted.describe(1).lostTabs, undefined);
+  });
+
   it("pruneTargets drops dead targets", async () => {
     await registry.createTaskSpace("work");
     await registry.createTab(1, "https://a.test/");
