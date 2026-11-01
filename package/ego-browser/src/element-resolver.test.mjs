@@ -1428,3 +1428,27 @@ test("a stale ref still recovers when role and name identify one element", async
   );
   assert.equal(resolved.objectId, "obj-99");
 });
+
+test("ElementResolutionError carries a stable code and a next-step hint", () => {
+  const cases = [
+    ["Selector #go matched 0 elements", "EGO_ELEMENT_NOT_FOUND", /snapshot/],
+    ["Element not found: @5", "EGO_ELEMENT_NOT_FOUND", /snapshot/],
+    [
+      "Locator text=Save matched 2 elements (2 visible, 0 hidden).",
+      "EGO_ELEMENT_AMBIGUOUS",
+      />> nth=N/,
+    ],
+    ["Stale ref: @4; take a new snapshot", "EGO_STALE_REF", /Refs last/],
+    [
+      "Page changed during snapshot; take a new snapshot",
+      "EGO_PAGE_CHANGED",
+      /waitForSettled/,
+    ],
+  ];
+  for (const [message, code, hint] of cases) {
+    const error = new ElementResolutionError(message, "transient");
+    assert.equal(error.error_code, code, message);
+    assert.match(error.hint, hint, message);
+    assert.equal(error.kind, "transient", "the retry classification is kept");
+  }
+});

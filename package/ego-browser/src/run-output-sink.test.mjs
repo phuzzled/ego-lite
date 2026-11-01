@@ -367,3 +367,17 @@ test("the direct CLI prints an ordinary uncaught error once", () => {
   assert.equal(result.status, 1);
   assert.equal(result.stderr.match(/single-error-probe/g)?.length, 1);
 });
+
+test("the direct CLI prints an error's hint on its own line after the stack", () => {
+  const entry = new URL("../dist/out/index.js", import.meta.url);
+  const result = spawnSync(process.execPath, [entry.pathname], {
+    input: 'throw new Error("Selector #missing matched 0 elements")\n',
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stderr,
+    /matched 0 elements\n(?: {4}at .*\n)+ {2}hint: Take a new snapshot/,
+  );
+});

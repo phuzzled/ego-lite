@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import { browserEgo, ensureSession } from "./browser-runtime.js";
-import { invokeEgo } from "./ego-errors.js";
+import { attachHint, invokeEgo } from "./ego-errors.js";
 
 type SpaceScope = {
   spaceId: number;
@@ -84,7 +84,11 @@ export class NativeOperationGate {
         }
       });
     };
-    const result = this.#tail.then(run);
+    // Every Page and TaskSpace operation passes here, so this is the one place
+    // that gives their errors a next-step hint.
+    const result = this.#tail.then(run).catch((error: unknown) => {
+      throw attachHint(error);
+    });
     // The queue is intentionally unbounded and covers long waits: changing the
     // selected space during any in-flight native operation would misroute it.
     // A failure rejects its caller without poisoning later FIFO entries.

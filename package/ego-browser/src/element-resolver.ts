@@ -1,3 +1,4 @@
+import { errorHint } from "./ego-errors.js";
 import { parseRef } from "./ref-map.js";
 import {
   ACTION_TARGET_STATE_HELPERS,
@@ -27,10 +28,38 @@ let snapshotLocatorBatchSequence = 0;
 
 export class ElementResolutionError extends Error {
   kind: "transient" | "permanent";
+  /** Set when an action timed out after its input may have reached the page. */
+  mayHaveLateEffects?: boolean;
   constructor(message: string, kind: "transient" | "permanent") {
     super(message);
     this.name = "ElementResolutionError";
     this.kind = kind;
+  }
+
+  /** EGO_ELEMENT_AMBIGUOUS, EGO_STALE_REF, or EGO_ELEMENT_NOT_FOUND. */
+  get error_code(): string {
+    if (/Stale ref|Unknown ref|unknown frame provenance/.test(this.message)) {
+      return "EGO_STALE_REF";
+    }
+    if (/Page changed during snapshot/.test(this.message)) {
+      return "EGO_PAGE_CHANGED";
+    }
+    if (
+      /matched (?:[2-9]|\d{2,}) (?:elements|frame contexts)(?!, but none)/.test(
+        this.message,
+      )
+    ) {
+      return "EGO_ELEMENT_AMBIGUOUS";
+    }
+    return "EGO_ELEMENT_NOT_FOUND";
+  }
+
+  /** One-sentence next step, derived from the failure. */
+  get hint(): string {
+    return (
+      errorHint({ message: this.message }) ??
+      "Take a new snapshot and check that the element is on the page, then use a ref or a loc= locator from it."
+    );
   }
 }
 

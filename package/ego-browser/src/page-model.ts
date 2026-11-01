@@ -84,7 +84,7 @@ import {
   type PageWaitForURLOptions,
 } from "./driver/page-waits.js";
 import { ElementResolutionError } from "./element-resolver.js";
-import { invokeEgo, probeAgentControl } from "./ego-errors.js";
+import { attachHint, invokeEgo, probeAgentControl } from "./ego-errors.js";
 import {
   withPage as defaultWithPage,
   withSpace as defaultWithSpace,
@@ -1148,23 +1148,31 @@ class TaskSpace {
       return error;
     }
     if (this.#finished) {
-      return new Error(
-        `${error.message}. Task space ${this.id} already finished, which ended its Page labels; do not use Pages after task.finish()`,
-        { cause: error },
+      return attachHint(
+        new Error(
+          `${error.message}. Task space ${this.id} already finished, which ended its Page labels; do not use Pages after task.finish()`,
+          { cause: error },
+        ),
+        "Open a new task space with await taskSpace(name) for further work.",
       );
     }
     if (this.ownership !== "agent") {
-      return new Error(
-        `${error.message}. Task space ${this.id} is owned by the user, so labels from a finished Agent task no longer exist; stop operating it unless the user asks you to continue`,
-        { cause: error },
+      return attachHint(
+        new Error(
+          `${error.message}. Task space ${this.id} is owned by the user, so labels from a finished Agent task no longer exist; stop operating it unless the user asks you to continue`,
+          { cause: error },
+        ),
+        "Stop. Ask the user before you work in this space again.",
       );
     }
     const labels = Object.keys(
       (await this.#services.ledger.read(this.id)).pages,
     );
-    return new Error(
-      `${error.message}. Managed Pages in task space ${this.id}: ${labels.join(", ") || "none"}. task.page(label) only refers to an existing Page; create one with await task.newPage()`,
-      { cause: error },
+    return attachHint(
+      new Error(
+        `${error.message}. Managed Pages in task space ${this.id}: ${labels.join(", ") || "none"}. task.page(label) only refers to an existing Page; create one with await task.newPage()`,
+        { cause: error },
+      ),
     );
   }
 
