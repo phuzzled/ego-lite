@@ -64,9 +64,39 @@ export function browserArgs(env = process.env) {
   if (passwordStore) args.push(`--password-store=${passwordStore}`);
   if (wantsHeadless(env)) args.push("--headless=new");
   if (env.EGO_LITE_CHROME_ARGS) {
-    args.push(...env.EGO_LITE_CHROME_ARGS.split(/\s+/).filter(Boolean));
+    args.push(...splitArgs(env.EGO_LITE_CHROME_ARGS));
   }
   args.push("about:blank");
+  return args;
+}
+
+/**
+ * Split a flag string on whitespace, like a shell: single or double quotes
+ * keep a value with spaces together, as in --flag="a b".
+ */
+export function splitArgs(text) {
+  const args = [];
+  let current = "";
+  let quote = null;
+  let started = false;
+  for (const char of text) {
+    if (quote) {
+      if (char === quote) quote = null;
+      else current += char;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+      started = true;
+    } else if (/\s/.test(char)) {
+      if (started) args.push(current);
+      current = "";
+      started = false;
+    } else {
+      current += char;
+      started = true;
+    }
+  }
+  if (quote) throw new Error(`Unclosed ${quote} in EGO_LITE_CHROME_ARGS`);
+  if (started) args.push(current);
   return args;
 }
 

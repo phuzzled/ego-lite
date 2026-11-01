@@ -1,7 +1,39 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { orphanBrowserPid, profileLockPid } from "./browser-launcher.mjs";
+import {
+  browserArgs,
+  orphanBrowserPid,
+  profileLockPid,
+  splitArgs,
+} from "./browser-launcher.mjs";
+
+describe("splitArgs", () => {
+  it("splits on whitespace", () => {
+    assert.deepEqual(splitArgs("  --a   --b=1\t--c "), ["--a", "--b=1", "--c"]);
+  });
+
+  it("keeps quoted values with spaces together", () => {
+    assert.deepEqual(
+      splitArgs(`--user-agent="My Agent 1.0" '--lang=en US' --x=""`),
+      ["--user-agent=My Agent 1.0", "--lang=en US", "--x="],
+    );
+  });
+
+  it("rejects an unclosed quote", () => {
+    assert.throws(() => splitArgs('--a="b'), /Unclosed "/);
+  });
+
+  it("feeds EGO_LITE_CHROME_ARGS to the browser", () => {
+    const args = browserArgs({
+      EGO_LITE_HEADLESS: "1",
+      EGO_LITE_PROFILE_DIR: "/p",
+      EGO_LITE_CHROME_ARGS: `--proxy-server="http://h:1" --window-name="Ego Lite"`,
+    });
+    assert.ok(args.includes("--proxy-server=http://h:1"));
+    assert.ok(args.includes("--window-name=Ego Lite"));
+  });
+});
 
 const PROFILE = "/home/u/.local/share/ego-lite/profile";
 const lockTo = (target) => (path) => {

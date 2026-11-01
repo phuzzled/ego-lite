@@ -37,7 +37,7 @@ stable build at install time; it is not pinned.
 | `EGO_LITE_CHROME`         | Browser binary to use                                       |
 | `EGO_LITE_HEADLESS`       | `1` or `0`; default is headless when there is no display    |
 | `EGO_LITE_PASSWORD_STORE` | Chrome `--password-store`; default `basic` when headless    |
-| `EGO_LITE_CHROME_ARGS`    | Extra browser flags                                         |
+| `EGO_LITE_CHROME_ARGS`    | Extra browser flags; quote a value with spaces: `--a="b c"` |
 | `EGO_LITE_PROFILE_DIR`    | Browser profile (default `~/.local/share/ego-lite/profile`) |
 
 Logs: `~/.local/state/ego-lite/daemon.log`.
