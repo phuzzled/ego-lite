@@ -22,6 +22,11 @@ Chrome or Chromium:
   one browser per persistent profile, and the routing of a round's CDP to it.
 - `src/cookies.mjs`, `src/secrets.mjs` — login import and export, and
   origin-bound secrets.
+- `src/oneshot.mjs` — the one-shot commands (`read`, `shot`, `tables`,
+  `snapshot`, `search`).
+- `src/mcp-server.mjs` — `ego-browser mcp`, an MCP server on stdio.
+- `src/sdk-session.mjs` — runs the SDK in-process for those two, one round at
+  a time through the SDK's `runMain()`, like `ego-browser nodejs`.
 
 ## Install
 
@@ -79,8 +84,128 @@ ego-browser cookies import-chrome --from <chrome profile dir> --profile <id>
                        --sites <a.com,...> [--keyring] [--dry-run]
 ego-browser secret set <name> --origin <https://site> [--origin ...]
 ego-browser secret list | remove <name>
+ego-browser read | shot | tables | snapshot | search ...   # one-shot commands, below
+ego-browser mcp [--profile <id>] [--timeout 2m] [--ttl 30m]  # MCP server, below
 ego-browser upgrade
 ```
+
+## One-shot commands
+
+For "read this URL" or "look at this page" without a script. Each command
+opens a throwaway task space (in the `ephemeral` profile, an empty cookie
+jar, unless `--profile` names another), loads the page, waits for it to
+settle, rejects a cookie banner (never accepts one), prints the result, and
+always finishes the space: on success, on an error, on a timeout and on
+Ctrl-C. A killed process leaves the space to the TTL collector (its TTL is
+the timeout plus 5 minutes).
+
+```bash
+ego-browser read https://example.com/post             # Markdown to stdout
+ego-browser read https://example.com/report.pdf       # PDF text, page by page
+ego-browser read --json https://example.com/post      # the full page.read() object
+ego-browser shot https://example.com --full --out /abs/shot.png   # prints the path
+ego-browser tables https://en.wikipedia.org/wiki/X    # Markdown tables
+ego-browser tables https://en.wikipedia.org/wiki/X --csv --index 0
+ego-browser tables https://en.wikipedia.org/wiki/X --csv --out /abs/dir/   # table-N.csv
+ego-browser snapshot https://example.com [--full]     # settled snapshot with refs
+ego-browser search "query" [--engine bing] [--max 5] [--json]
+```
+
+| Option              | Meaning                                                                      |
+| ------------------- | ---------------------------------------------------------------------------- |
+| `--json`            | print the SDK result as JSON; errors print `{ ok: false, error_code, hint }` |
+| `--profile <id>`    | `ephemeral` (default), `Default` (your logins) or a named profile            |
+| `--timeout <d>`     | whole command, `30s`, `90000ms` or `2m` (default 60 s, 1 s to 30 m)          |
+| `--sdk-path <file>` | SDK to load, as for `nodejs`                                                 |
+
+`read` also takes `--max-chars <n>` and `--mode article|full`; `shot` and
+`snapshot` take `--full` (a full-page screenshot is cut at 7500 CSS px, which
+image models accept). Without a scheme, a URL gets `https://`; only http and
+https are accepted. Notes (a cut screenshot, a page with little text, an
+engine that was blocked) go to stderr, so stdout stays clean.
+
+| Exit | Meaning                                                     |
+| ---- | ----------------------------------------------------------- |
+| 0    | ok                                                          |
+| 1    | other error (the message has `error_code` and `hint` lines) |
+| 2    | usage error                                                 |
+| 3    | blocked by a bot check (or every search engine was)         |
+| 4    | the server answered an HTTP error (4xx or 5xx)              |
+| 5    | timeout                                                     |
+| 130  | interrupted (Ctrl-C); the space is closed first             |
+
+A navigation that fails with a network blip (`ERR_NETWORK_CHANGED`,
+`ERR_CONNECTION_RESET`) is retried once.
+
+## MCP server
+
+`ego-browser mcp` is a Model Context Protocol server on stdio
+(newline-delimited JSON-RPC, protocol versions 2024-11-05 to 2025-11-25),
+for agents without a shell. It has no dependencies beyond this package.
+
+Each tool takes an optional `task` (default `"main"`). The first call for a
+task creates a task space (named `mcp <task> <session>`, TTL 30 minutes of
+no use); later calls reuse it, and `page` (default `p1`) picks the tab.
+Calls run one at a time. When the client disconnects (stdin closes) or the
+server gets SIGINT, SIGTERM or SIGHUP, it closes every space it created,
+except spaces handed off to the user, which stay with the user. Arguments
+are checked against each tool's JSON schema; a tool error comes back as
+`isError: true` with the message, `error_code` and the SDK's `hint`.
+
+| Tool                  | Arguments                                                                                  | Result                                                                   |
+| --------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| `browser_open`        | `url`, `task?`, `page?`, `newPage?`, `profile?`, `snapshot?`, `timeout?`                   | space, page, url, title, status, consent; settled snapshot               |
+| `browser_snapshot`    | `task?`, `page?`, `scope?`, `root?`, `settle?`                                             | snapshot text with `@refs`                                               |
+| `browser_act`         | `action` (click, fill, press, select, hover), `target?`, `value?`, `snapshot?`, `timeout?` | receipt (popups, dialog) + new snapshot                                  |
+| `browser_read`        | `url?`, `mode?`, `selector?`, `maxChars?` (default 30000)                                  | title, url, words, Markdown                                              |
+| `browser_tables`      | `url?`, `index?`, `selector?`, `csv?`                                                      | tables as JSON, or CSV                                                   |
+| `browser_search`      | `query`, `engine?`, `max?`                                                                 | ranked results; all engines blocked is an error                          |
+| `browser_screenshot`  | `fullPage?`, `maxHeight?` (default 7500)                                                   | PNG image content                                                        |
+| `browser_evaluate`    | `expression`                                                                               | JSON value                                                               |
+| `browser_wait_for`    | `selector?` + `state?`, or `url?`, or neither (settle); `timeout?`                         | what matched                                                             |
+| `browser_fill_secret` | `target`, `secret`                                                                         | `secret … typed on <origin>`, never the value                            |
+| `browser_handoff`     | `reason?`, `relay?`                                                                        | relay: paths and the screenshot; else a viewer link on a virtual display |
+| `browser_takeover`    | `task?`                                                                                    | control is back; snapshot again                                          |
+| `browser_spaces`      | none                                                                                       | every space; this session's carry `task`                                 |
+| `browser_close_space` | `space` (id)                                                                               | closed, or why not                                                       |
+| `browser_finish`      | `task?`, `keep?` (`"all"` or labels)                                                       | the `finish()` receipt                                                   |
+| `browser_run`         | `script`                                                                                   | what an SDK script printed (full API)                                    |
+
+Options: `--profile <id>` for new spaces (default: the `Default` profile, with
+your logins; `ephemeral` for an empty cookie jar), `--timeout <d>` per tool
+call (default 2m), `--ttl <d>` idle TTL of its spaces (default 30m),
+`--sdk-path <file>`. The server only writes protocol messages to stdout; logs
+and notices go to stderr.
+
+**Claude Code:**
+
+```bash
+claude mcp add ego-browser -- ego-browser mcp
+```
+
+**Claude Desktop** (`claude_desktop_config.json`) **and other JSON-configured
+clients** (Cursor, Windsurf, Cline):
+
+```json
+{
+  "mcpServers": {
+    "ego-browser": { "command": "ego-browser", "args": ["mcp"] }
+  }
+}
+```
+
+**Codex** (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.ego-browser]
+command = "ego-browser"
+args = ["mcp"]
+```
+
+**Any stdio client:** run `ego-browser mcp` and speak MCP on its stdin and
+stdout. Use the full path (`which ego-browser`) when the client does not
+inherit your `PATH`, and add `"--profile", "ephemeral"` to the args to keep
+the agent away from your logins.
 
 ## Profiles
 
@@ -188,8 +313,8 @@ ego-browser secret remove github-password
 ```
 
 ```js
-await page.click("loc=role:textbox[name='Password']"); // focus the field
-await ego.fillSecret("github-password"); // { filled: true, secret, origin }
+await page.fillSecret("loc=role:textbox[name='Password']", "github-password");
+// { filled: true, secret, origin }; MCP clients use browser_fill_secret
 ```
 
 - Stored in `~/.local/share/ego-lite/secrets.json`, mode 0600 in a 0700
@@ -310,7 +435,10 @@ memory of every browser (proportional set size of their process trees).
 - After a browser restart a space keeps its id but loses its tabs; it is
   marked stale and the agent is told which URLs were open.
   `ego-browser restore <id>` or `ego.restoreTaskSpaceTabs()` reopens the
-  http(s) ones (GET only; form state is lost).
+  http(s) ones (GET only; form state is lost). In a script,
+  `taskSpace(name, { restorePages: true })` or `await task.restorePages()`
+  reopens them with their Page labels (`p1`, `p2`), so `task.page("p1")`
+  works again.
 
 ## Host extensions to `globalThis.ego`
 
@@ -362,11 +490,10 @@ CI runs both on ubuntu-latest, the E2E suite headless and headed under
 - No on-screen hand-off banner. Hand-off and take-over work through the API.
 - Permission prompts (camera, location) do not move control to the user yet.
 - A snapshot shows the page as it is at that moment. Single-page apps can show
-  an empty shell right after `goto()`; wait for the content first.
-- Page labels (`p1`) are not restored after a browser restart; that needs the
-  SDK's `restorePages`.
+  an empty shell right after `goto()`; use `page.snapshot({ settle: true })`
+  or wait for the content first.
 - The virtual display has no window manager. The daemon places and raises
   windows itself. Windows have no title bars, so the user cannot move or
   resize them in the viewer.
-- The SDK has no `page.fillSecret()` yet; scripts call `ego.fillSecret()`
-  after focusing the field.
+- Full-page screenshots taller than about 16000 px can time out in headless
+  Chrome; the one-shot `shot --full` and the MCP server cut them at 7500 px.
