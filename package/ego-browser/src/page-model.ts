@@ -27,6 +27,15 @@ import {
 } from "./browser-runtime.js";
 import { runtimeValue } from "./cdp-eval.js";
 import { stitchPngsVertically } from "./png-stitch.js";
+import {
+  knowsSecrets,
+  recordSecretField,
+  redactSecretText,
+  redactSecretUrl,
+  rememberSecretFieldNames,
+  secretFieldNames,
+  secretHashSalt,
+} from "./secret-urls.js";
 import { withTemporaryClipboardText } from "./clipboard.js";
 import {
   captureScreenshotForSession,
@@ -598,6 +607,8 @@ type PageModelServices = {
     options: { targetId: string; clear: boolean },
   ): Promise<{ filled: boolean; secret: string; origin: string }>;
   logEvent(entry: Record<string, unknown>): void;
+  /** True when the host says a secret was filled in this task space. */
+  spaceHadSecrets?(spaceId: number): Promise<boolean>;
   agentWorkspace(): string;
 };
 
@@ -899,6 +910,7 @@ const recordPageUrlToken = Symbol("recordPageUrl");
 const withSpaceToken = Symbol("withSpace");
 /** Memo key under which the SDK keeps each Page label's last URL. */
 const PAGE_URLS_MEMO_KEY = "__ego.pageUrls";
+const SECRET_FIELDS_MEMO_KEY = "__ego.secretFields";
 const RESERVED_MEMO_PREFIX = "__ego.";
 const DEFAULT_MAP_CONCURRENCY = 3;
 
@@ -1060,6 +1072,22 @@ const baseDefaultServices: Omit<PageModelServices, "ledger" | "pageBudget"> = {
     return invokeEgo("task.handOff", () =>
       ego.handOffTaskSpace({ relay: true }),
     );
+  },
+  async spaceHadSecrets(spaceId) {
+    try {
+      const ego = browserEgo();
+      if (typeof ego?.listTaskSpaces !== "function") return false;
+      const result = await ego.listTaskSpaces();
+      const list = Array.isArray(result) ? result : result?.spaces;
+      return Boolean(
+        Array.isArray(list) &&
+        list.some(
+          (space: any) => Number(space?.id) === spaceId && space?.secrets,
+        ),
+      );
+    } catch {
+      return false;
+    }
   },
   logEvent(entry) {
     try {
@@ -1726,7 +1754,10 @@ class TaskSpace {
       if (pages.length > 0) {
         bufferOutput(
           `[ego-browser] browser restarted; reopened ${pages
-            .map((page) => `${page.label} at ${page.url}`)
+            .map(
+              (page) =>
+                `${page.label} at ${redactSecretUrl(page.url, this.id)}`,
+            )
             .join(", ")} (form state is lost)\n`,
         );
         if (capabilities.taskSpaceMemo) {
@@ -1847,8 +1878,9 @@ class TaskSpace {
     try {
       await this.#services.gate.withSpace(this.id, async () => {
         const saved = await this.#readPageUrls();
-        if (saved[label] === url) return;
-        await this.#savePageUrls({ ...saved, [label]: url });
+        const kept = redactSecretUrl(url, this.id);
+        if (saved[label] === kept) return;
+        await this.#savePageUrls({ ...saved, [label]: kept });
       });
     } catch {
       // Restore metadata is best effort.
@@ -1887,7 +1919,9 @@ class TaskSpace {
     const live: Record<string, string> = {};
     for (const [label, page] of Object.entries(ledger.pages)) {
       const url = tabs.find((tab) => tab.targetId === page.targetId)?.url;
-      if (url && /^https?:\/\//i.test(url)) live[label] = url;
+      if (url && /^https?:\/\//i.test(url)) {
+        live[label] = redactSecretUrl(url, this.id);
+      }
     }
     try {
       const before = await this.#readPageUrls();
@@ -2719,12 +2753,19 @@ class Page {
       });
       // Mark the field, so the extractors (read, tables, structuredData)
       // redact its value in the page. Snapshots are redacted by the host.
-      await evaluateInSession(
+      const marked = await evaluateInSession<{
+        name?: string;
+        hash?: string;
+      } | null>(
         this.#services,
         sessionId,
-        markSecretFieldExpression(name),
+        markSecretFieldExpression(name, secretHashSalt()),
         false,
-      ).catch(() => undefined);
+      ).catch(() => null);
+      if (marked && typeof marked === "object") {
+        recordSecretField(this.spaceId, marked);
+        await this.#saveSecretFieldNames();
+      }
       return result;
     });
   }
@@ -3264,7 +3305,13 @@ class Page {
   }
 
   async url(): Promise<string> {
-    return this.#evaluate("location.href", false);
+    const url = await this.#evaluate<string>("location.href", false);
+    // Only a field this process can identify is hidden here; the URL must
+    // stay usable for navigation.
+    const redaction = await this.#secretRedaction();
+    return redaction && typeof url === "string"
+      ? redactSecretUrl(url, this.spaceId)
+      : url;
   }
 
   async waitForURL(
@@ -4677,12 +4724,50 @@ class Page {
     return refs;
   }
 
+  /** Keep the names of secret fields with the space for later rounds. */
+  async #saveSecretFieldNames(): Promise<void> {
+    if (!this.#services.hostCapabilities().taskSpaceMemo) return;
+    try {
+      await this.#services.taskSpaceMemo(SECRET_FIELDS_MEMO_KEY, {
+        value: secretFieldNames(this.spaceId),
+      });
+    } catch {
+      // Best effort: this round still knows the names.
+    }
+  }
+
+  /**
+   * How to redact SDK-built URLs in this space: undefined when no secret was
+   * filled, else whether to hide every query value (the host says a secret
+   * was filled, but this process cannot tell which value it was).
+   */
+  async #secretRedaction(): Promise<{ conservative: boolean } | undefined> {
+    if (knowsSecrets(this.spaceId)) return { conservative: false };
+    if (!this.#services.hostCapabilities().fillSecret) return undefined;
+    if (this.#services.hostCapabilities().taskSpaceMemo) {
+      try {
+        const saved = await this.#services.taskSpaceMemo(
+          SECRET_FIELDS_MEMO_KEY,
+        );
+        if (saved?.found) rememberSecretFieldNames(this.spaceId, saved.value);
+      } catch {
+        // Fall through to the host's flag.
+      }
+      if (knowsSecrets(this.spaceId)) return { conservative: false };
+    }
+    const flagged = await this.#services
+      .spaceHadSecrets?.(this.spaceId)
+      .catch(() => false);
+    return flagged ? { conservative: true } : undefined;
+  }
+
   async #snapshotHeader(page: PageTarget): Promise<string> {
     try {
       const [tabs, ledger] = await Promise.all([
         this.#services.listTabs(),
         this.#services.ledger.read(this.spaceId),
       ]);
+      const redaction = await this.#secretRedaction();
       return snapshotSourceHeader({
         currentLabel: this.label,
         currentTargetId: page.targetId,
@@ -4691,6 +4776,10 @@ class Page {
         spaceId: this.spaceId,
         spaceName: this.#spaceName,
         tabs,
+        redact: redaction
+          ? (text) =>
+              redactSecretText(text, this.spaceId, redaction.conservative)
+          : undefined,
       });
     } catch {
       return `[${this.label} | space ${JSON.stringify(this.#spaceName)}(${this.spaceId})]`;
@@ -4731,18 +4820,23 @@ function snapshotSourceHeader(input: {
   spaceId: number;
   spaceName: string;
   tabs: RuntimeTab[];
+  /** Hides filled secrets in a title or URL before it is shortened. */
+  redact?: (text: string) => string;
 }): string {
+  const redact = input.redact ?? ((text: string) => text);
   const tabsByTarget = new Map(input.tabs.map((tab) => [tab.targetId, tab]));
   const managedTargets = new Set(
     Object.values(input.ledger.pages).map((page) => page.targetId),
   );
   const current = tabsByTarget.get(input.currentTargetId);
   const currentTitle = compactPageTitle(
-    current?.title || current?.url || "untitled",
+    redact(current?.title || current?.url || "untitled"),
   );
   const pages = Object.entries(input.ledger.pages).map(([label, page]) => {
     const tab = tabsByTarget.get(page.targetId);
-    const title = compactPageTitle(tab?.title || tab?.url || "untitled");
+    const title = compactPageTitle(
+      redact(tab?.title || tab?.url || "untitled"),
+    );
     return `${label}${page.targetId === input.currentTargetId ? "*" : ""} ${JSON.stringify(title)}`;
   });
   const untracked = input.tabs.filter(
@@ -5444,8 +5538,8 @@ function isPageCapacityError(error: unknown): boolean {
 }
 
 /** Mark the focused field (through shadow roots and frames) as a secret. */
-function markSecretFieldExpression(name: string): string {
-  return `(() => {
+function markSecretFieldExpression(name: string, salt: string): string {
+  return `(async () => {
     let doc = document;
     let active = doc.activeElement;
     for (let depth = 0; active && depth < 32; depth += 1) {
@@ -5456,11 +5550,19 @@ function markSecretFieldExpression(name: string): string {
         active = doc.activeElement;
       } else break;
     }
-    if (!active || active === doc.body) return false;
+    if (!active || active === doc.body) return null;
     active.setAttribute(${JSON.stringify(SECRET_FIELD_ATTRIBUTE)}, ${JSON.stringify(name)});
     doc.documentElement.setAttribute(${JSON.stringify(SECRET_DOCUMENT_ATTRIBUTE)}, "");
     document.documentElement.setAttribute(${JSON.stringify(SECRET_DOCUMENT_ATTRIBUTE)}, "");
-    return true;
+    // Only the field's name and a salted hash of its value leave the page.
+    const value = typeof active.value === "string" && active.value ? active.value : (active.textContent || "");
+    let hash;
+    try {
+      const bytes = new TextEncoder().encode(${JSON.stringify(salt)} + value);
+      const digest = await crypto.subtle.digest("SHA-256", bytes);
+      hash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+    } catch {}
+    return { name: active.getAttribute("name") || "", hash };
   })()`;
 }
 

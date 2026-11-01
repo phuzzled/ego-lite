@@ -8038,3 +8038,32 @@ test("page.read waits once for a page that is still drawing, then falls back to 
     assert.equal(result.warning, undefined);
   });
 });
+
+test("the snapshot header hides a filled secret in a tab URL", async () => {
+  await withFixture(async (fixture) => {
+    const task = taskForRound(fixture, "round-a", {
+      hostCapabilities: () => ({ fillSecret: true }),
+      async fillSecret(name) {
+        return { filled: true, secret: name, origin: "https://example.test" };
+      },
+      async cdp(method, params, sessionId, timeoutMs) {
+        if (
+          method === "Runtime.evaluate" &&
+          String(params.expression).includes("data-ego-secret")
+        ) {
+          return { result: { type: "object", value: { name: "pw" } } };
+        }
+        return fixture.services.cdp(method, params, sessionId, timeoutMs);
+      },
+    });
+    const page = await openTestPage(
+      task,
+      "https://example.test/done?user=ann&pw=hunter2",
+    );
+    await page.fillSecret("#password", "site-password");
+    const text = await page.snapshot();
+    const header = text.split("\n")[0];
+    assert.doesNotMatch(header, /hunter2/);
+    assert.match(header, /pw=\[secret\]/);
+  });
+});
