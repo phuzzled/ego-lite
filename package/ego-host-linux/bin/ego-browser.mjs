@@ -497,6 +497,7 @@ async function runGc(args) {
     dryRun,
     actions,
     browsers = [],
+    ledgers = [],
   } = await control.call("gc", {
     dryRun: args.includes("--dry-run"),
   });
@@ -506,8 +507,15 @@ async function runGc(args) {
       `-\t${dryRun ? "would stop" : "stopped"} the idle browser of profile ${profileId}\n`,
     );
   }
+  if (ledgers.length > 0) {
+    process.stdout.write(
+      `-\t${dryRun ? "would remove" : "removed"} the SDK state of ${ledgers.length} closed task spaces\n`,
+    );
+  }
   if (actions.length === 0) {
-    if (browsers.length === 0) process.stdout.write("nothing to collect\n");
+    if (browsers.length === 0 && ledgers.length === 0) {
+      process.stdout.write("nothing to collect\n");
+    }
     return 0;
   }
   for (const action of actions) {

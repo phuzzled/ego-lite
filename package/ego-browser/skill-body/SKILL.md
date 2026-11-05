@@ -95,6 +95,10 @@ and diagnose the CLI or installation only if it fails.
   whether to work there (`claimTaskSpace(id)`), or pick another name.
 - Never use a new TaskSpace to recover from a stuck or blocked Page. Recover in
   the same space, or stop and ask the user.
+- For a task that runs again and again, such as a routine or a check every few
+  minutes, use the same space name in every run (for example the routine's
+  name, with no time or date in it), so that each run resumes one space. On a
+  Linux host, also pass a short `ttlMs`, such as `{ ttlMs: 1_800_000 }`.
 - Every invocation starts a new Node.js process. Task spaces, tabs, and
   Page labels persist; JavaScript variables do not.
 - A new space starts with Page `p1`; navigate it, and reuse Pages with `goto()`.

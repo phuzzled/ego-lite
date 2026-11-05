@@ -170,6 +170,11 @@ export class TaskSpaceRegistry {
     };
   }
 
+  /** The ids of the spaces this registry has, and the next id it will issue. */
+  spaceIds() {
+    return { ids: [...this.#spaces.keys()], nextId: this.#nextId };
+  }
+
   /** Full internal view of one space, used by the CLI-side bindings. */
   describe(id) {
     const space = this.#spaces.get(id);

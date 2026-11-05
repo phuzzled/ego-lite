@@ -419,7 +419,7 @@ starts; a limit of 0 turns it off):
   "maxTotalPages": 24,
   "maxRssMb": 3072,
   "maxBrowsers": 4,
-  "defaultTtlMs": 86400000,
+  "defaultTtlMs": 7200000,
   "handOffTtlMs": 3600000,
   "gcIntervalMs": 600000,
   "viewerPort": 6080,
@@ -437,7 +437,16 @@ memory of every browser (proportional set size of their process trees).
 - Every daemon call on a space, and every CDP attach to one of its tabs,
   counts as use. `ego-browser gc` (and the daemon, every `gcIntervalMs`)
   closes agent spaces idle longer than their TTL: `defaultTtlMs`, or the
-  `ttlMs` the space was created with. User-owned spaces are never closed.
+  `ttlMs` the space was created with (`defaultTtlMs` is 2 hours). User-owned
+  spaces are never closed.
+- A run that throws leaves its space open so that it can resume, and an open
+  space counts toward `maxTaskSpaces` until it is finished or closed. A task
+  that runs again and again (a routine, a check every few minutes) should use
+  the same space name each run, so that each run resumes one space, and set a
+  short `ttlMs`.
+- When the daemon closes a space, it also removes the SDK's Page state of that
+  space (`space-<id>.json` in `EGO_BROWSER_STATE_DIR` or
+  `~/.ego-browser/state`), at start and at each gc.
 - After a browser restart a space keeps its id but loses its tabs; it is
   marked stale and the agent is told which URLs were open.
   `ego-browser restore <id>` or `ego.restoreTaskSpaceTabs()` reopens the

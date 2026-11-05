@@ -3,7 +3,7 @@
  * a limit of 0 turns that limit off.
  *
  *   { "maxTaskSpaces": 8, "maxPagesPerSpace": 6, "maxTotalPages": 24,
- *     "maxRssMb": 3072, "maxBrowsers": 4, "defaultTtlMs": 86400000 }
+ *     "maxRssMb": 3072, "maxBrowsers": 4, "defaultTtlMs": 7200000 }
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -19,8 +19,10 @@ export const DEFAULT_CONFIG = Object.freeze({
   maxRssMb: 3072,
   // Browser processes: one per profile in use (Default included).
   maxBrowsers: 4,
-  // Idle time after which `gc` closes an agent space.
-  defaultTtlMs: 24 * 60 * 60_000,
+  // Idle time after which `gc` closes an agent space. A run that fails keeps
+  // its space open so that it can resume, and a space held open counts toward
+  // maxTaskSpaces until gc closes it: 2 hours frees those spaces the same day.
+  defaultTtlMs: 2 * 60 * 60_000,
   // Idle time after which a hand-off nobody can see returns to the agent.
   handOffTtlMs: 60 * 60_000,
   gcIntervalMs: 10 * 60_000,

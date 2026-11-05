@@ -70,6 +70,7 @@ import {
   redactSecrets,
   secretNameProblem,
 } from "./secrets.mjs";
+import { pruneSdkLedgers, sdkStateDir } from "./sdk-ledgers.mjs";
 import { captureSnapshot } from "./snapshot.mjs";
 import { TaskSpaceRegistry } from "./task-spaces.mjs";
 import { Viewer, findNoVnc } from "./viewer.mjs";
@@ -540,7 +541,30 @@ export async function runDaemon(env = process.env) {
         await pool.stop(profileId);
       }
     }
-    return { dryRun, actions, browsers };
+    const ledgers = pruneLedgers({ dryRun });
+    return { dryRun, actions, browsers, ledgers };
+  }
+
+  /** The SDK ledgers of spaces that are gone (see sdk-ledgers.mjs). */
+  function pruneLedgers({ dryRun = false } = {}) {
+    try {
+      const { ids, nextId } = registry.spaceIds();
+      const removed = pruneSdkLedgers({
+        dir: sdkStateDir(env),
+        liveIds: ids,
+        nextId,
+        dryRun,
+      });
+      if (!dryRun && removed.length > 0) {
+        log(
+          `gc: removed the SDK state of ${removed.length} closed task spaces`,
+        );
+      }
+      return removed;
+    } catch (error) {
+      log(`gc: could not clean the SDK state: ${error.message}`);
+      return [];
+    }
   }
 
   /** The running browser of a profile whose cookies may be read or written. */
@@ -850,6 +874,7 @@ export async function runDaemon(env = process.env) {
     if (!socket.destroyed) socket.write(encode(reply));
   }
 
+  pruneLedgers();
   const gcTimer = setInterval(() => {
     runGc().catch((error) => log(`gc failed: ${error.message}`));
   }, config.gcIntervalMs);
